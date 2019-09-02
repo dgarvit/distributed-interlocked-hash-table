@@ -8,6 +8,8 @@ param BUCKET_DESTROYED = 2;
 config param BUCKET_NUM_ELEMS = 8;
 config param DEFAULT_NUM_BUCKETS = 1024;
 config param MULTIPLIER_NUM_BUCKETS : real = 2;
+config param DEPTH = 2;
+config param EMAX = 4;
 
 var seedRNG = new owned RandomStream(uint(64), parSafe=true);
 
@@ -39,8 +41,9 @@ class Bucket : Base {
   var keys : BUCKET_NUM_ELEMS * keyType;
   var values : BUCKET_NUM_ELEMS * valType;
 
-  proc init(parent : unmanaged Buckets(?keyType, ?valType)) {
+  proc init(parent : unmanaged Buckets(?keyType, ?valType) = nil) {
     super(keyType, valType);
+    this.seed = seedRNG.getNext();
     this.parent = parent;
   }
 }
@@ -51,7 +54,7 @@ class Buckets : Base {
   var seed : uint(64);
   var count : uint;
   var bucketsDom = {0..-1};
-  var buckets : [bucketsDom] LocalAtomic(unmanaged Bucket(keyType, valType));
+  var buckets : [bucketsDom] AtomicObject(unmanaged Bucket(keyType, valType));
 
   proc init(parent : unmanaged Buckets(?keyType, ?valType) = nil) {
     super(keyType, valType);
@@ -63,9 +66,18 @@ class Buckets : Base {
       this.bucketsDom = {0..#round(parent.buckets.size * MULTIPLIER_NUM_BUCKETS):int};
     }
   }
+
+  proc hash(key : keyType) { // temporary hash function; works only for int
+    var x = y;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9:int;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111eb:int;
+    x = x ^ (x >> 31);
+    x = x ^ seed;
+    return x;
+  }
 }
 
-class Map : Base {
+class ConcurrentMap : Base {
   var count : atomic uint;
   var root : unmanaged Buckets(keyType, valType);
 
@@ -73,5 +85,52 @@ class Map : Base {
     super(keyType, valType);
     root = new unmanaged Buckets();
     root.lock.write(P_INNER);
+  }
+
+  proc getEList(key : keyType) : (Buckets, Buckets) {
+    var found : unmanaged Buckets = nil;
+    var l : unmanaged Buckets = nil;
+    var curr = root;
+    while true {
+      var idx = root.hash(key) % BUCKET_NUM_ELEMS;
+      var next = curr.buckets[idx];
+      if (next == nil) {
+        found = new unmanaged Buckets(curr);
+        found.lock.write(E_AVAIL);
+
+        if (l == nil) {
+          found.lock.write(E_LOCK);
+          l = found;
+        }
+
+        if (root.buckets[idx].compareExchange(nil, found)) then
+          return (found, l);
+      }
+
+      else if (next.lock.read() == P_TERM) {
+        if (next.lock.compareExchange(P_TERM, P_LOCK)) {
+          curr = next;
+          l = curr;
+        }
+      }
+
+      else if (next.lock.read() == P_INNER) {
+        curr = next;
+      }
+
+      else if (next.lock.read() == E_AVAIL) {
+        if ((l != nil) && next.lock.compareExchange(E_AVAIL, E_LOCK)) {
+          if (l == nil) then
+            l = next;
+
+          if next.count < EMAX then
+            return (next, l);
+
+          for i in 1..next.count {
+            if (next.keys[i])
+          }
+        }
+      }
+    }
   }
 }
