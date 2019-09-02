@@ -91,7 +91,7 @@ class ConcurrentMap : Base {
     var found : unmanaged Buckets = nil;
     var l : unmanaged Buckets = nil;
     var curr = root;
-    while true {
+    while (true) {
       var idx = root.hash(key) % BUCKET_NUM_ELEMS;
       var next = curr.buckets[idx];
       if (next == nil) {
@@ -127,10 +127,26 @@ class ConcurrentMap : Base {
             return (next, l);
 
           for i in 1..next.count {
-            if (next.keys[i])
+            if (next.keys[i] == key) then
+              return (next, l);
           }
         }
       }
+
+      next.lock.write(GARBAGE);
+
+      if (curr.lock.read() == P_INNER) {
+        var p = EToP(next);
+      }
+    }
+  }
+
+  proc EToP(elist : unmanaged Buckets) : unmanaged Buckets {
+    var p = new unmanaged Buckets(elist.parent);
+    p.lock.write(P_INNER);
+
+    for i in 1..elist.count {
+
     }
   }
 }
