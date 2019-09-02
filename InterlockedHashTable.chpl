@@ -27,15 +27,15 @@ class Base {
 // Stores keys and values in the hash table. The lock is used to
 // determine both the 'lock'/'unlock' state of the bucket, and if
 // the bucket is going to be destroyed, meaning that the task should 
-// back out and try again. The bucket gets destroyed when an task 
+// back out and try again. The bucket gets destroyed when a task
 // attempts to insert an element into an already-full bucket. All
-// tasks _much_ be in the current epoch to even get this far, so
+// tasks _must_ be in the current epoch to even get this far, so
 // this Bucket, even if the lock value is BUCKET_DESTROYED, should
 // not be destroyed until no it is safe to do so.
 class Bucket : Base {
   var lock : atomic int;
   var parent : unmanaged Buckets(keyType, valType);
-  var count : int;
+  var count : uint;
   var keys : BUCKET_NUM_ELEMS * keyType;
   var values : BUCKET_NUM_ELEMS * valType;
 
@@ -46,12 +46,14 @@ class Bucket : Base {
 }
 
 class Buckets : Base {
+  var lock : atomic int;
   var parent : unmanaged Buckets(keyType, valType);
   var seed : uint(64);
+  var count : uint;
   var bucketsDom = {0..-1};
-  var buckets : [bucketsDom] LocalAtomic(unmanaged Base(keyType, valType));
+  var buckets : [bucketsDom] LocalAtomic(unmanaged Bucket(keyType, valType));
 
-  proc init(parent : unmanaged Buckets(?keyType, ?valType)) {
+  proc init(parent : unmanaged Buckets(?keyType, ?valType) = nil) {
     super(keyType, valType);
     this.parent = parent;
     this.seed = seedRNG.getNext();
@@ -60,5 +62,16 @@ class Buckets : Base {
     } else {
       this.bucketsDom = {0..#round(parent.buckets.size * MULTIPLIER_NUM_BUCKETS):int};
     }
+  }
+}
+
+class Map : Base {
+  var count : atomic uint;
+  var root : unmanaged Buckets(keyType, valType);
+
+  proc init(type keyType, type valType) {
+    super(keyType, valType);
+    root = new unmanaged Buckets();
+    root.lock.write(P_INNER);
   }
 }
