@@ -87,39 +87,43 @@ class ConcurrentMap : Base {
     root.lock.write(P_INNER);
   }
 
-  proc getEList(key : keyType) : (Buckets, Buckets) {
-    var found : unmanaged Buckets = nil;
-    var l : unmanaged Buckets = nil;
+  proc getEList(key : keyType) : Bucket {
+    var found : unmanaged Bucket?;
     var curr = root;
     while (true) {
-      var idx = root.hash(key) % BUCKET_NUM_ELEMS;
+      var idx = curr.hash(key) % curr.buckets.size;
       var next = curr.buckets[idx];
       if (next == nil) {
-        found = new unmanaged Buckets(curr);
-        found.lock.write(E_AVAIL);
+        var newList = new unmanaged Bucket(curr);
 
-        if (l == nil) {
-          found.lock.write(E_LOCK);
-          l = found;
-        }
+        // Ignoring P_INNER stuff for now, so found is always nil
+        // newList.lock.write(E_AVAIL);
+        // if (found == nil) {
+        //   newList.lock.write(E_LOCK);
+        //   found = newList;
+        // }
+        newList.lock.write(E_LOCK);
+        found = newList;
 
-        if (root.buckets[idx].compareExchange(nil, found)) then
-          return (found, l);
+        if (curr.buckets[idx].compareExchange(nil, newList)) then
+          return found;
+        else
+          delete newList;
       }
 
-      else if (next.lock.read() == P_TERM) {
-        if (next.lock.compareExchange(P_TERM, P_LOCK)) {
-          curr = next;
-          l = curr;
-        }
-      }
+      // else if (next.lock.read() == P_TERM) {
+      //   if (next.lock.compareExchange(P_TERM, P_LOCK)) {
+      //     curr = next;
+      //     l = curr;
+      //   }
+      // }
 
       else if (next.lock.read() == P_INNER) {
-        curr = next;
+        curr = next; // Type mismatch?
       }
 
       else if (next.lock.read() == E_AVAIL) {
-        if ((l != nil) && next.lock.compareExchange(E_AVAIL, E_LOCK)) {
+        if (next.lock.compareExchange(E_AVAIL, E_LOCK)) {
           if (l == nil) then
             l = next;
 
@@ -131,22 +135,8 @@ class ConcurrentMap : Base {
               return (next, l);
           }
         }
+        next.lock.write(GARBAGE); // Move the Bucket into Buckets and deferDelete the old Bucket
       }
-
-      next.lock.write(GARBAGE);
-
-      if (curr.lock.read() == P_INNER) {
-        var p = EToP(next);
-      }
-    }
-  }
-
-  proc EToP(elist : unmanaged Buckets) : unmanaged Buckets {
-    var p = new unmanaged Buckets(elist.parent);
-    p.lock.write(P_INNER);
-
-    for i in 1..elist.count {
-
     }
   }
 }
