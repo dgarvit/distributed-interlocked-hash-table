@@ -23,8 +23,8 @@ const GARBAGE = 6;
 
 // Can be either a singular 'Bucket' or a plural 'Buckets'
 class Base {
-  type keyType;
-  type valType;
+	type keyType;
+	type valType;
 	// If E_AVAIL || E_LOCK, can be cas to `Bucket`
 	// if P_INNER, can be cast to `Buckets`
 	// if GARBAGE, then reload as its to be destroyed.
@@ -44,100 +44,100 @@ class Base {
 // this Bucket, even if the lock value is BUCKET_DESTROYED, should
 // not be destroyed until no it is safe to do so.
 class Bucket : Base {
-  var count : uint;
-  var keys : BUCKET_NUM_ELEMS * keyType;
-  var values : BUCKET_NUM_ELEMS * valType;
+	var count : uint;
+	var keys : BUCKET_NUM_ELEMS * keyType;
+	var values : BUCKET_NUM_ELEMS * valType;
 
-  proc init(parent : unmanaged Buckets(?keyType, ?valType) = nil) {
-    super(keyType, valType);
+	proc init(parent : unmanaged Buckets(?keyType, ?valType) = nil) {
+		super(keyType, valType);
 		this.lock.write(E_AVAIL);
-    this.seed = seedRNG.getNext();
-    this.parent = parent;
-  }
+		this.seed = seedRNG.getNext();
+		this.parent = parent;
+	}
 }
 
 class Buckets : Base {
-  var seed : uint(64);
-  var count : uint;
-  var bucketsDom = {0..-1};
-  var buckets : [bucketsDom] AtomicObject(unmanaged Base(keyType, valType));
+	var seed : uint(64);
+	var count : uint;
+	var bucketsDom = {0..-1};
+	var buckets : [bucketsDom] AtomicObject(unmanaged Base(keyType, valType));
 
-  proc init(parent : unmanaged Buckets(?keyType, ?valType) = nil) {
-    super(keyType, valType);
+	proc init(parent : unmanaged Buckets(?keyType, ?valType) = nil) {
+		super(keyType, valType);
 		this.lock.write(P_INNER);
-    this.parent = parent;
-    this.seed = seedRNG.getNext();
-    if parent == nil {
-      this.bucketsDom = {0..#DEFAULT_NUM_BUCKETS};
-    } else {
-      this.bucketsDom = {0..#round(parent.buckets.size * MULTIPLIER_NUM_BUCKETS):int};
-    }
-  }
+		this.parent = parent;
+		this.seed = seedRNG.getNext();
+		if parent == nil {
+			this.bucketsDom = {0..#DEFAULT_NUM_BUCKETS};
+		} else {
+			this.bucketsDom = {0..#round(parent.buckets.size * MULTIPLIER_NUM_BUCKETS):int};
+		}
+	}
 
-  proc hash(key : keyType) { // temporary hash function
-    var x = chpl__defaultHash(key);
-    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9:int;
-    x = (x ^ (x >> 27)) * 0x94d049bb133111eb:int;
-    x = x ^ (x >> 31);
-    x = x ^ seed;
-    return x;
-  }
+	proc hash(key : keyType) { // temporary hash function
+		var x = chpl__defaultHash(key);
+		x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9:int;
+		x = (x ^ (x >> 27)) * 0x94d049bb133111eb:int;
+		x = x ^ (x >> 31);
+		x = x ^ seed;
+		return x;
+	}
 
 	proc size return buckets.size;
 }
 
 class ConcurrentMap : Base {
-  var count : atomic uint;
-  var root : unmanaged Buckets(keyType, valType);
+	var count : atomic uint;
+	var root : unmanaged Buckets(keyType, valType);
 
-  proc init(type keyType, type valType) {
-    super(keyType, valType);
-    root = new unmanaged Buckets();
-    root.lock.write(P_INNER);
-  }
+	proc init(type keyType, type valType) {
+		super(keyType, valType);
+		root = new unmanaged Buckets();
+		root.lock.write(P_INNER);
+	}
 
-  proc getEList(key : keyType, isInsertion : bool) : Bucket? {
-    var found : unmanaged Bucket?;
-    var curr = root;
-    while (true) {
-      var idx = curr.hash(key) % curr.buckets.size;
-      var next = curr.buckets[idx];
-      if (next == nil) {
+	proc getEList(key : keyType, isInsertion : bool) : Bucket? {
+		var found : unmanaged Bucket?;
+		var curr = root;
+		while (true) {
+			var idx = curr.hash(key) % curr.buckets.size;
+			var next = curr.buckets[idx];
+			if (next == nil) {
 				// If we're not inserting something, I.E we are removing 
 				// or retreiving, we are done.
 				if !isInsertion then return nil;
 
 				// Otherwise, speculatively create a new bucket to add in.
-        var newList = new unmanaged Bucket(curr);
-        newList.lock.write(E_LOCK);
+				var newList = new unmanaged Bucket(curr);
+				newList.lock.write(E_LOCK);
 
 				// We set our Bucket, we also own it so return it
-        if (curr.buckets[idx].compareExchange(nil, newList)) {
-          return newList;
+				if (curr.buckets[idx].compareExchange(nil, newList)) {
+					return newList;
 				} else {
 					// Someone else set their bucket, reload.
-          delete newList;
+					delete newList;
 				}
-      }
-      else if (next.lock.read() == P_INNER) {
-        curr = next : unmanaged Buckets?;
+			}
+			else if (next.lock.read() == P_INNER) {
+				curr = next : unmanaged Buckets?;
 				assert(curr, "Bad cast!");
-      }
-      else if (next.lock.read() == E_AVAIL) {
+			}
+			else if (next.lock.read() == E_AVAIL) {
 				// We now own the bucket...
-        if (next.lock.compareExchange(E_AVAIL, E_LOCK)) {
+				if (next.lock.compareExchange(E_AVAIL, E_LOCK)) {
 					// Non-insertions don't care.
-          if !isInsertion then return next;
+					if !isInsertion then return next;
 					// Insertions cannot have a full bucket...
 					// If it is not full return it
-          if next.count < BUCKET_NUM_ELEMS then
-            return next;
+					if next.count < BUCKET_NUM_ELEMS then
+						return next;
 
-          for k in next.keys {
-            if k == key {
-              return next;
+					for k in next.keys {
+						if k == key {
+							return next;
 						}
-          }
+					}
 
 					// Rehash into new Buckets
 					var newBuckets = new unmanaged Buckets(keyType, valType);
@@ -156,8 +156,8 @@ class ConcurrentMap : Base {
 					// TODO: Need to pass this to 'EpochManager.deferDelete'
 					next.lock.write(GARBAGE);
 					curr.buckets[idx] = newBuckets;	
-        }
-      }
-    }
-  }
+				}
+			}
+		}
+	}
 }
