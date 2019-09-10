@@ -237,33 +237,34 @@ class ConcurrentMap : Base {
 					if !isInsertion then return next;
 					// Insertions cannot have a full bucket...
 					// If it is not full return it
-					if next.count < BUCKET_NUM_ELEMS then
-						return next;
+					var bucket = next : unmanaged Bucket(keyType, valType)?;
+					if bucket.count < BUCKET_NUM_ELEMS then
+						return bucket;
 
-					for k in next.keys {
+					for k in bucket.keys {
 						if k == key {
-							return next;
+							return bucket;
 						}
 					}
 
 					// Rehash into new Buckets
 					var newBuckets = new unmanaged Buckets(keyType, valType);
-					for (k,v) in zip(next.keys, next.values) {
-						var idx = newBuckets.hash(key) % newBuckets.buckets.size;
-						ref bucketRef = newBuckets[idx];
+					for (k,v) in zip(bucket.keys, bucket.values) {
+						var idx = (newBuckets.hash(key) % newBuckets.buckets.size:uint):int;
+						ref bucketRef = newBuckets.buckets[idx];
 						if bucketRef.read() == nil {
 							bucketRef.write(new unmanaged Bucket(keyType, valType));
 						}
-						var bucket = bucketRef.read();
+						var buck = bucketRef.read() : unmanaged Bucket(keyType, valType)?;
 						bucket.count += 1;
 						bucket.keys[bucket.count] = k;
 						bucket.values[bucket.count] = v;
 					}
-					
+
 					// TODO: Need to pass this to 'EpochManager.deferDelete'
 					next.lock.write(GARBAGE);
 					tok.deferDelete(next);
-					curr.buckets[idx] = newBuckets;	
+					curr.buckets[idx].write(newBuckets: unmanaged Base(keyType, valType)?);	
 				}
 			}
 
