@@ -252,12 +252,12 @@ class ConcurrentMap : Base {
 					for (k,v) in zip(bucket.keys, bucket.values) {
 						var idx = (newBuckets.hash(k) % newBuckets.size:uint):int;
 						if newBuckets.buckets[idx].read() == nil {
-							newBuckets.buckets[idx].write(new unmanaged Bucket(keyType, valType));
+							newBuckets.buckets[idx].write(new unmanaged Bucket(newBuckets));
 						}
 						var buck = newBuckets.buckets[idx].read() : unmanaged Bucket(keyType, valType)?;
 						buck.count += 1;
-						buck.keys[bucket.count] = k;
-						buck.values[bucket.count] = v;
+						buck.keys[buck.count] = k;
+						buck.values[buck.count] = v;
 					}
 
 					// TODO: Need to pass this to 'EpochManager.deferDelete'
@@ -359,7 +359,7 @@ proc main() {
 	// writeln("Iterated elements: " + count:string);
 	// writeln("Total elements in map: " + map.size:string);
 
-	forall i in 1..N {
+	for i in 1..N {
 		assert(map.find(i)[1], "Missing ", i);
 	}
 
