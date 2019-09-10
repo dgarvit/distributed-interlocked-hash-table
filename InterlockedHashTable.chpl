@@ -21,6 +21,86 @@ const P_TERM = 4;
 const P_LOCK = 5;
 const GARBAGE = 6;
 
+class DeferredNode {
+	type eltType;
+	var val : eltType?;
+	var prev : unmanaged DeferredNode(eltType?)?;
+	var next : unmanaged DeferredNode(eltType?)?;
+
+	proc init(type eltType) {
+		this.eltType = eltType;
+	}
+
+	proc init(val : ?eltType) {
+		this.eltType = eltType;
+		this.val = val;
+	}
+
+	proc deinit() {
+		var prevNode = prev;
+		var nextNode = next;
+		if (prevNode == nil) {
+			if (nextNode != nil) then nextNode.prev = nil;
+		} else {
+			if (nextNode == nil) then prevNode.next = nil;
+			else {
+				prevNode.next = nextNode;
+				nextNode.prev = prevNode;
+			}
+		}
+	}
+}
+
+class StackNode {
+	type eltType;
+	var val : eltType?;
+	var next : unmanaged StackNode(eltType?)?;
+
+	proc init(type eltType) {
+		this.eltType = eltType;
+	}
+
+	proc init(val : ?eltType) {
+		this.eltType = eltType;
+		this.val = val;
+	}
+}
+
+class Stack {
+	type eltType;
+	var top : unmanaged StackNode(eltType?)?;
+	var count : int;
+
+	proc init(type eltType) {
+		this.eltType = eltType;
+	}
+
+	proc push(val : eltType?) {
+		var node = new unmanaged StackNode(val);
+		node.next = top;
+		top = node;
+		count += 1;
+	}
+
+	proc pop() : eltType? {
+		if (count > 0) {
+			var ret = top.val;
+			var next = top.next;
+			delete top;
+			top = next;
+			count -= 1;
+			return ret;
+		} else {
+			var temp : eltType?;
+			return temp;
+		}
+	}
+
+  proc isEmpty() : bool {
+    return count == 0;
+  }
+}
+
 // Can be either a singular 'Bucket' or a plural 'Buckets'
 class Base {
 	type keyType;
@@ -32,7 +112,12 @@ class Base {
 	// Is always either 'nil' if its the root, or a
 	// a 'Buckets', but I cannot make the field of
 	// type 'Buckets' as it is not defined yet.
-	var parent : unmanaged Base(keyType, valType);
+	var parent : unmanaged Base(keyType?, valType?)?;
+
+	proc init(type keyType, type valType) {
+		this.keyType = keyType;
+		this.valType = valType;
+	}
 }
 
 // Stores keys and values in the hash table. The lock is used to
@@ -48,60 +133,81 @@ class Bucket : Base {
 	var keys : BUCKET_NUM_ELEMS * keyType;
 	var values : BUCKET_NUM_ELEMS * valType;
 
-	proc init(parent : unmanaged Buckets(?keyType, ?valType) = nil) {
-		super(keyType, valType);
+	proc init(type keyType, type valType) {
+		super.init(keyType, valType);
 		this.lock.write(E_AVAIL);
-		this.seed = seedRNG.getNext();
+	}
+
+	proc init(parent : unmanaged Buckets(?keyType, ?valType) = nil) {
+		super.init(keyType, valType);
+		this.lock.write(E_AVAIL);
 		this.parent = parent;
+	}
+
+	proc releaseLock() {
+		if (lock.read() == E_LOCK) then lock.write(E_AVAIL);
 	}
 }
 
 class Buckets : Base {
 	var seed : uint(64);
-	var count : uint;
+	var size : int;
 	var bucketsDom = {0..-1};
-	var buckets : [bucketsDom] AtomicObject(unmanaged Base(keyType, valType));
+	var buckets : [bucketsDom] AtomicObject(unmanaged Base(keyType?, valType?)?, hasABASupport=false, hasGlobalSupport=true);
+	// var buckets : [0..(size-1)] AtomicObject(unmanaged Base(keyType?, valType?)?, hasABASupport=false, hasGlobalSupport=true);
 
-	proc init(parent : unmanaged Buckets(?keyType, ?valType) = nil) {
-		super(keyType, valType);
+	proc init(type keyType, type valType) {
+		super.init(keyType, valType);
+		this.lock.write(P_INNER);
+		this.seed = seedRNG.getNext();
+		this.size = DEFAULT_NUM_BUCKETS;
+		this.bucketsDom = {0..#DEFAULT_NUM_BUCKETS};
+	}
+
+	proc init(parent : unmanaged Buckets(?keyType, ?valType)) {
+		super.init(keyType, valType);
+		this.seed = seedRNG.getNext();
 		this.lock.write(P_INNER);
 		this.parent = parent;
-		this.seed = seedRNG.getNext();
-		if parent == nil {
-			this.bucketsDom = {0..#DEFAULT_NUM_BUCKETS};
-		} else {
-			this.bucketsDom = {0..#round(parent.buckets.size * MULTIPLIER_NUM_BUCKETS):int};
-		}
+		this.size = round(parent.buckets.size * MULTIPLIER_NUM_BUCKETS):int;
+		this.bucketsDom = {0..#round(parent.buckets.size * MULTIPLIER_NUM_BUCKETS):int};
 	}
 
-	proc hash(key : keyType) { // temporary hash function
-		var x = chpl__defaultHash(key);
-		x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9:int;
-		x = (x ^ (x >> 27)) * 0x94d049bb133111eb:int;
-		x = x ^ (x >> 31);
-		x = x ^ seed;
-		return x;
+	// _gen_key will generate the hash on the combined seed and hash of original key
+	// which ensures a better distribution of keys from varying seeds.
+	proc hash(key : keyType) {
+		return _gen_key(chpl__defaultHashCombine(chpl__defaultHash(key), seed, 1));
 	}
 
-	proc size return buckets.size;
+	proc releaseLock() {
+		if (lock.read() == P_LOCK) then lock.write(P_TERM);
+	}
+
+	// proc size return buckets.size;
 }
 
 class ConcurrentMap : Base {
 	var count : atomic uint;
 	var root : unmanaged Buckets(keyType, valType);
+	var _manager = new owned LocalEpochManager();
 
 	proc init(type keyType, type valType) {
-		super(keyType, valType);
-		root = new unmanaged Buckets();
+		super.init(keyType, valType);
+		root = new unmanaged Buckets(keyType, valType);
 		root.lock.write(P_INNER);
 	}
 
-	proc getEList(key : keyType, isInsertion : bool) : Bucket? {
-		var found : unmanaged Bucket?;
+	proc getToken() : owned TokenWrapper {
+		return _manager.register();
+	}
+
+	proc getEList(key : keyType, isInsertion : bool, tok : owned TokenWrapper) : Bucket? {
+		var found : unmanaged Bucket(keyType, valType)?;
 		var curr = root;
+		var shouldYield = false;
 		while (true) {
-			var idx = curr.hash(key) % curr.buckets.size;
-			var next = curr.buckets[idx];
+			var idx = (curr.hash(key) % (curr.buckets.size):uint):int;
+			var next = curr.buckets[idx].read();
 			if (next == nil) {
 				// If we're not inserting something, I.E we are removing 
 				// or retreiving, we are done.
@@ -112,7 +218,7 @@ class ConcurrentMap : Base {
 				newList.lock.write(E_LOCK);
 
 				// We set our Bucket, we also own it so return it
-				if (curr.buckets[idx].compareExchange(nil, newList)) {
+				if (curr.buckets[idx].compareAndSwap(nil, newList)) {
 					return newList;
 				} else {
 					// Someone else set their bucket, reload.
@@ -120,12 +226,13 @@ class ConcurrentMap : Base {
 				}
 			}
 			else if (next.lock.read() == P_INNER) {
-				curr = next : unmanaged Buckets?;
-				assert(curr, "Bad cast!");
+				curr = next : unmanaged Buckets(keyType, valType);
+				// TODO: What does this do?
+				// assert(curr, "Bad cast!");
 			}
 			else if (next.lock.read() == E_AVAIL) {
 				// We now own the bucket...
-				if (next.lock.compareExchange(E_AVAIL, E_LOCK)) {
+				if (next.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
 					// Non-insertions don't care.
 					if !isInsertion then return next;
 					// Insertions cannot have a full bucket...
@@ -145,7 +252,7 @@ class ConcurrentMap : Base {
 						var idx = newBuckets.hash(key) % newBuckets.buckets.size;
 						ref bucketRef = newBuckets[idx];
 						if bucketRef.read() == nil {
-							bucketRef.write(new unmanaged Bucket(keyType, valType))
+							bucketRef.write(new unmanaged Bucket(keyType, valType));
 						}
 						var bucket = bucketRef.read();
 						bucket.count += 1;
@@ -155,9 +262,83 @@ class ConcurrentMap : Base {
 					
 					// TODO: Need to pass this to 'EpochManager.deferDelete'
 					next.lock.write(GARBAGE);
+					tok.deferDelete(next);
 					curr.buckets[idx] = newBuckets;	
 				}
 			}
+
+			if shouldYield then chpl_task_yield(); // If lock could not be acquired
+			shouldYield = true;
 		}
 	}
+
+	proc insert(key : keyType, val : valType, tok : owned TokenWrapper = getToken()) : bool {
+		tok.pin();
+		var elist = getEList(key, true, tok);
+		for i in 1..elist.count {
+			if (elist.keys[i] == key) {
+				elist.lock.write(E_AVAIL);
+				tok.unpin();
+				return false;
+			}
+		}
+		count.add(1);
+		elist.count += 1;
+		elist.keys[elist.count] = key;
+		elist.values[elist.count] = val;
+		elist.lock.write(E_AVAIL);
+		tok.unpin();
+		return true;
+	}
+
+	proc find(key : keyType, tok : owned TokenWrapper = getToken()) : (bool, valType) {
+		tok.pin();
+		var elist = getEList(key, false, tok);
+		var res : valType?;
+		var found = false;
+		for i in 1..elist.count {
+			if (elist.keys[i] == key) {
+				res = elist.values[i];
+				found = true;
+				break;
+			}
+		}
+		elist.lock.write(E_AVAIL);
+		tok.unpin();
+		return (found, res);
+	}
+
+	proc erase(key : keyType, tok : owned TokenWrapper = getToken()) : bool {
+		tok.pin();
+		var elist = getEList(key, false, tok);
+		var res = false;
+		for i in 1..elist.count {
+			if (elist.keys[i] == key) {
+				count.sub(1);
+				elist.keys[i] = elist.keys[elist.count];
+				elist.values[i] = elist.values[elist.count];
+				elist.count -= 1;
+				res = true;
+				break;
+			}
+		}
+
+		elist.lock.write(E_AVAIL);
+		tok.unpin();
+		return res;
+	}
 }
+
+config const N = 1024 * 32;
+proc main() {
+	var map = new ConcurrentMap(int, int);
+	for i in 1..10 {
+		map.insert(i, i**2);
+	}
+
+	for i in 1..10 {
+		writeln(map.find(i));
+		writeln(map.erase(i));
+	}
+}
+
