@@ -1,6 +1,7 @@
 use AtomicObjects;
 use EpochManager;
 use Random;
+use VisualDebug;
 
 param BUCKET_UNLOCKED = 0;
 param BUCKET_LOCKED = 1;
@@ -340,10 +341,10 @@ class ConcurrentMap : Base {
 config const N = 1024 * 32;
 proc main() {
 	var map = new ConcurrentMap(int, int);
-	var dist : [0..#DEFAULT_NUM_BUCKETS] int;
-	for i in 1..N {
-		map.insert(i, i**2);
-	}
+	// var dist : [0..#DEFAULT_NUM_BUCKETS] int;
+	// for i in 1..N {
+	// 	map.insert(i, i**2);
+	// }
 
 	// forall i in 1..1000 {
 	// 	writeln(map.find(i));
@@ -359,39 +360,60 @@ proc main() {
 	// writeln("Iterated elements: " + count:string);
 	// writeln("Total elements in map: " + map.size:string);
 
-	for i in 1..N {
-		assert(map.find(i)[1], "Missing ", i);
-	}
+	// for i in 1..N {
+	// 	assert(map.find(i)[1], "Missing ", i);
+	// }
 
-	forall i in 1..N {
-		map.erase(i);
-	}
+	// forall i in 1..N {
+	// 	map.erase(i);
+	// }
 
 	use Time;
 	var timer = new Timer();
 	// Use map as an integer-based set
 
 	var set : domain(int, parSafe=true);
-	timer.start();
-	forall i in 1..N with (var tok = map.getToken()) {
-		map.insert(i, i, tok);
+	for i in 1..(max(uint(8)):int) {
+		set += i;
 	}
-	map.tryReclaim();
-	forall i in 1..N with (var tok = map.getToken()) {
-		map.erase(i, tok);
+	timer.start();
+	coforall tid in 1..here.maxTaskPar with (ref set) {
+		var rng = new RandomStream(real);
+		var keyRng = new RandomStream(int);
+		for i in 1..N {
+			var key = keyRng.getNext(0, max(uint(8)):int);
+			var s = rng.getNext();
+			if s < 0.33 {
+				set += key;
+			} else if s < 0.66 {
+				set -= key;
+			} else {
+				set.contains(key);
+			}
+		}
+	}
+	timer.stop();
+	writeln("Assocaitive Array: ", timer.elapsed());
+	timer.clear();
+
+	map.insert(1..(max(uint(8)):int), 0);
+	timer.start();
+	coforall tid in 1..here.maxTaskPar {
+		var rng = new RandomStream(real);
+		var keyRng = new RandomStream(int);
+		for i in 1..N {
+			var s = rng.getNext();
+			var key = keyRng.getNext(0, max(uint(8)):int);
+			if s < 0.33 {
+				map.insert(key,i);
+			} else if s < 0.66 {
+				map.erase(key);
+			} else {
+				map.find(key);
+			}
+		}
 	}
 	timer.stop();
 	writeln("Concurrent Map: ", timer.elapsed());
-	timer.clear();
-
-	timer.start();
-	forall i in 1..N with (ref set) {
-		set += i;
-	}
-	forall i in 1..N with (ref set) {
-		set -= i;
-	}
-	timer.stop();
-	writeln("Associative Map: ", timer.elapsed());
 	timer.clear();
 }
