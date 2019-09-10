@@ -228,8 +228,6 @@ class ConcurrentMap : Base {
 			}
 			else if (next.lock.read() == P_INNER) {
 				curr = next : unmanaged Buckets(keyType, valType);
-				// TODO: What does this do?
-				// assert(curr, "Bad cast!");
 			}
 			else if (next.lock.read() == E_AVAIL) {
 				// We now own the bucket...
@@ -250,9 +248,9 @@ class ConcurrentMap : Base {
 
 					// writeln(bucket.count);
 					// Rehash into new Buckets
-					var newBuckets = new unmanaged Buckets(keyType, valType);
+					var newBuckets = new unmanaged Buckets(curr);
 					for (k,v) in zip(bucket.keys, bucket.values) {
-						var idx = (newBuckets.hash(key) % newBuckets.buckets.size:uint):int;
+						var idx = (newBuckets.hash(k) % newBuckets.size:uint):int;
 						if newBuckets.buckets[idx].read() == nil {
 							newBuckets.buckets[idx].write(new unmanaged Bucket(keyType, valType));
 						}
@@ -265,7 +263,8 @@ class ConcurrentMap : Base {
 					// TODO: Need to pass this to 'EpochManager.deferDelete'
 					next.lock.write(GARBAGE);
 					tok.deferDelete(next);
-					curr.buckets[idx].write(newBuckets: unmanaged Base(keyType, valType)?);	
+					curr.buckets[idx].write(newBuckets: unmanaged Base(keyType, valType));
+					curr = newBuckets;
 				}
 			}
 
@@ -361,7 +360,7 @@ proc main() {
 	// writeln("Total elements in map: " + map.size:string);
 
 	forall i in 1..N {
-		assert(map.find(i)[1]);
+		assert(map.find(i)[1], "Missing ", i);
 	}
 
 	forall i in 1..N {
