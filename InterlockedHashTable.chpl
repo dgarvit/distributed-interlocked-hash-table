@@ -6,7 +6,7 @@ param BUCKET_UNLOCKED = 0;
 param BUCKET_LOCKED = 1;
 param BUCKET_DESTROYED = 2;
 config param BUCKET_NUM_ELEMS = 8;
-config param DEFAULT_NUM_BUCKETS = 1024;
+config const DEFAULT_NUM_BUCKETS = 1024;
 config param MULTIPLIER_NUM_BUCKETS : real = 2;
 config param DEPTH = 2;
 config param EMAX = 4;
@@ -201,13 +201,14 @@ class ConcurrentMap : Base {
 		return _manager.register();
 	}
 
-	proc getEList(key : keyType, isInsertion : bool, tok : owned TokenWrapper) : Bucket? {
+	proc getEList(key : keyType, isInsertion : bool, tok : owned TokenWrapper) : unmanaged Bucket(keyType, valType)? {
 		var found : unmanaged Bucket(keyType, valType)?;
 		var curr = root;
 		var shouldYield = false;
 		while (true) {
 			var idx = (curr.hash(key) % (curr.buckets.size):uint):int;
 			var next = curr.buckets[idx].read();
+			// writeln("stuck");
 			if (next == nil) {
 				// If we're not inserting something, I.E we are removing 
 				// or retreiving, we are done.
@@ -234,7 +235,7 @@ class ConcurrentMap : Base {
 				// We now own the bucket...
 				if (next.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
 					// Non-insertions don't care.
-					if !isInsertion then return next;
+					if !isInsertion then return next : unmanaged Bucket(keyType, valType);
 					// Insertions cannot have a full bucket...
 					// If it is not full return it
 					var bucket = next : unmanaged Bucket(keyType, valType)?;
@@ -247,18 +248,18 @@ class ConcurrentMap : Base {
 						}
 					}
 
+					// writeln(bucket.count);
 					// Rehash into new Buckets
 					var newBuckets = new unmanaged Buckets(keyType, valType);
 					for (k,v) in zip(bucket.keys, bucket.values) {
 						var idx = (newBuckets.hash(key) % newBuckets.buckets.size:uint):int;
-						ref bucketRef = newBuckets.buckets[idx];
-						if bucketRef.read() == nil {
-							bucketRef.write(new unmanaged Bucket(keyType, valType));
+						if newBuckets.buckets[idx].read() == nil {
+							newBuckets.buckets[idx].write(new unmanaged Bucket(keyType, valType));
 						}
-						var buck = bucketRef.read() : unmanaged Bucket(keyType, valType)?;
-						bucket.count += 1;
-						bucket.keys[bucket.count] = k;
-						bucket.values[bucket.count] = v;
+						var buck = newBuckets.buckets[idx].read() : unmanaged Bucket(keyType, valType)?;
+						buck.count += 1;
+						buck.keys[bucket.count] = k;
+						buck.values[bucket.count] = v;
 					}
 
 					// TODO: Need to pass this to 'EpochManager.deferDelete'
@@ -271,6 +272,7 @@ class ConcurrentMap : Base {
 			if shouldYield then chpl_task_yield(); // If lock could not be acquired
 			shouldYield = true;
 		}
+		return nil;
 	}
 
 	proc insert(key : keyType, val : valType, tok : owned TokenWrapper = getToken()) : bool {
@@ -296,6 +298,7 @@ class ConcurrentMap : Base {
 		tok.pin();
 		var elist = getEList(key, false, tok);
 		var res : valType?;
+		if (elist == nil) then return (false, res);
 		var found = false;
 		for i in 1..elist.count {
 			if (elist.keys[i] == key) {
@@ -312,6 +315,7 @@ class ConcurrentMap : Base {
 	proc erase(key : keyType, tok : owned TokenWrapper = getToken()) : bool {
 		tok.pin();
 		var elist = getEList(key, false, tok);
+		if (elist == nil) then return false;
 		var res = false;
 		for i in 1..elist.count {
 			if (elist.keys[i] == key) {
@@ -328,18 +332,67 @@ class ConcurrentMap : Base {
 		tok.unpin();
 		return res;
 	}
+
+	proc tryReclaim() {
+		_manager.tryReclaim();
+	}
 }
 
 config const N = 1024 * 32;
 proc main() {
 	var map = new ConcurrentMap(int, int);
-	for i in 1..10 {
+	var dist : [0..#DEFAULT_NUM_BUCKETS] int;
+	for i in 1..N {
 		map.insert(i, i**2);
 	}
 
-	for i in 1..10 {
-		writeln(map.find(i));
-		writeln(map.erase(i));
-	}
-}
+	// forall i in 1..1000 {
+	// 	writeln(map.find(i));
+	// }
 
+
+	// visit(map.root);
+	// for (x,y) in zip(hist, histDom) do writeln("[" + y:string + "]: " + x:string);
+	// var count = 0;
+	// for i in map {
+	// 	count += 1;
+	// }
+	// writeln("Iterated elements: " + count:string);
+	// writeln("Total elements in map: " + map.size:string);
+
+	forall i in 1..N {
+		assert(map.find(i)[1]);
+	}
+
+	forall i in 1..N {
+		map.erase(i);
+	}
+
+	use Time;
+	var timer = new Timer();
+	// Use map as an integer-based set
+
+	var set : domain(int, parSafe=true);
+	timer.start();
+	forall i in 1..N with (var tok = map.getToken()) {
+		map.insert(i, i, tok);
+	}
+	map.tryReclaim();
+	forall i in 1..N with (var tok = map.getToken()) {
+		map.erase(i, tok);
+	}
+	timer.stop();
+	writeln("Concurrent Map: ", timer.elapsed());
+	timer.clear();
+
+	timer.start();
+	forall i in 1..N with (ref set) {
+		set += i;
+	}
+	forall i in 1..N with (ref set) {
+		set -= i;
+	}
+	timer.stop();
+	writeln("Associative Map: ", timer.elapsed());
+	timer.clear();
+}
