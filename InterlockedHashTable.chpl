@@ -283,6 +283,8 @@ class ConcurrentMap : Base {
 	// Current iterator can be locked indefinitely if function breaks
 	// Eg: for i in map do break;
 	iter these() : (keyType, valType) {
+		var tok = getToken();
+		tok.pin();
 		// Data stored on recursionStack: PointerList, start, i
 		var recursionStack = new LockFreeStack(stackType);
 		var deferred : unmanaged DeferredNode(deferredType)?;
@@ -356,6 +358,7 @@ class ConcurrentMap : Base {
 				}
 			}
 		}
+		tok.unpin();
 	}
 
 	proc insert(key : keyType, val : valType, tok : owned TokenWrapper = getToken()) : bool {
