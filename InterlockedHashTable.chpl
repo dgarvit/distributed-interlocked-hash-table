@@ -1,4 +1,5 @@
 use AtomicObjects;
+use LockFreeStack;
 use EpochManager;
 use Random;
 use VisualDebug;
@@ -191,6 +192,9 @@ class ConcurrentMap : Base {
 	var count : atomic uint;
 	var root : unmanaged Buckets(keyType, valType);
 	var _manager = new owned LocalEpochManager();
+	var iterRNG = new owned RandomStream(uint(64), parSafe=true);
+	type stackType = (unmanaged Buckets(keyType, valType)?, int, int);
+	type deferredType = (unmanaged Buckets(keyType, valType)?, int);
 
 	proc init(type keyType, type valType) {
 		super.init(keyType, valType);
@@ -273,6 +277,85 @@ class ConcurrentMap : Base {
 			shouldYield = true;
 		}
 		return nil;
+	}
+
+		// TODO: RAII based Locks.
+	// Current iterator can be locked indefinitely if function breaks
+	// Eg: for i in map do break;
+	iter these() : (keyType, valType) {
+		// Data stored on recursionStack: PointerList, start, i
+		var recursionStack = new LockFreeStack(stackType);
+		var deferred : unmanaged DeferredNode(deferredType)?;
+		var restore = true;
+		var curr : unmanaged Buckets(keyType, valType)? = root;
+		var start = ((iterRNG.getNext())%(curr.buckets.size):uint):int;
+		var startIndex = 0;
+
+		while (true) {
+			restore = true;
+			for i in startIndex..(curr.buckets.size-1) {
+				var idx = (start + i)%curr.buckets.size;
+				var bucketBase = curr.buckets[idx].read();
+				if (bucketBase != nil) {
+					if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+						var bucket = bucketBase : unmanaged Bucket(keyType, valType);
+						for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
+						bucket.lock.write(E_AVAIL);
+					} else if (bucketBase.lock.read() == P_INNER) {
+						var stackElem = (curr, start, i);
+						recursionStack.push(stackElem);
+						curr = bucketBase : unmanaged Buckets(keyType, valType);
+						start = ((iterRNG.getNext())%(curr.buckets.size):uint):int;
+						startIndex = 0;
+						restore = false;
+						break;
+					} else {
+						var deferredElem = (curr, idx);
+						var deferredNode = new unmanaged DeferredNode(deferredElem);
+						deferredNode.next = deferred;
+						deferred.prev = deferredNode;
+						deferred = deferredNode;
+					}
+				}
+			}
+
+			if (restore == true) {
+			var (hasState, state) = recursionStack.pop();
+				if (hasState) {
+					curr = state[1];
+					start = state[2];
+					startIndex = state[3] + 1;
+					continue;
+				} else {
+					var head = deferred;
+					var continueFlag = false;
+					while (head != nil) {
+						var pList = head.val[1];
+						var idx = head.val[2];
+						var bucketBase = pList.buckets[idx].read();
+						var next = head.next;
+						if (bucketBase.lock.read() == P_INNER) {
+							delete head;
+							curr = bucketBase : unmanaged Buckets(keyType, valType);
+							start = ((iterRNG.getNext())%(curr.size):uint):int;
+							startIndex = 0;
+							continueFlag = true;
+							break;
+						} else if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+							delete head;
+							var bucket = bucketBase : unmanaged Bucket(keyType, valType);
+							for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
+							bucket.lock.write(E_AVAIL);
+						}
+						head = next;
+					}
+
+					if (continueFlag == false && deferred != nil) {
+						chpl_task_yield();
+					} else if (deferred == nil) then break;
+				}
+			}
+		}
 	}
 
 	proc insert(key : keyType, val : valType, tok : owned TokenWrapper = getToken()) : bool {
