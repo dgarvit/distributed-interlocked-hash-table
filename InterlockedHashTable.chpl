@@ -1,5 +1,6 @@
 use AtomicObjects;
 use LockFreeStack;
+use LockFreeQueue;
 use EpochManager;
 use Random;
 use VisualDebug;
@@ -279,7 +280,7 @@ class ConcurrentMap : Base {
 		return nil;
 	}
 
-		// TODO: RAII based Locks.
+	// TODO: RAII based Locks.
 	// Current iterator can be locked indefinitely if function breaks
 	// Eg: for i in map do break;
 	iter these() : (keyType, valType) {
@@ -355,6 +356,65 @@ class ConcurrentMap : Base {
 					if (continueFlag == false && deferred != nil) {
 						chpl_task_yield();
 					} else if (deferred == nil) then break;
+				}
+			}
+		}
+		tok.unpin();
+	}
+
+	iter these(param tag:iterKind) where tag == iterKind.standalone {// : (keyType, valType) {
+		var tok = getToken();
+		tok.pin();
+		var workList = new LockFreeStack(unmanaged Base(keyType, valType)?);
+		var deferred = new LockFreeQueue(deferredType);
+		var _startIdx = ((iterRNG.getNext())%(root.buckets.size):uint):int;
+		var started : atomic int;
+		var finished : atomic int;
+		for i in 0..(root.buckets.size-1) {
+			var idx = (_startIdx + i)%root.buckets.size;
+			var bucketBase = root.buckets[idx].read();
+			if (bucketBase != nil) {
+				if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+					var bucket = bucketBase : unmanaged Bucket(keyType, valType);
+					for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
+					bucket.lock.write(E_AVAIL);
+				} else if (bucketBase.lock.read() == P_INNER) {
+					started.add(1);
+					workList.push(bucketBase);
+				} else {
+					// Handle Deferred
+					// Is Queue the right structure? (Cannot delete an element in the middle)
+				}
+			}
+		}
+
+		coforall tid in 1..here.maxTaskPar {
+			while (true) {
+				var (hasNode, _node) = workList.pop();
+				if (hasNode) {
+					finished.add(1);
+					var node = _node : unmanaged Buckets(keyType, valType);
+					var startIdx = ((iterRNG.getNext())%(node.buckets.size):uint):int;
+					for i in 0..(node.buckets.size-1) {
+						var idx = (startIdx + i)%node.buckets.size;
+						var bucketBase = node.buckets[idx].read();
+						if (bucketBase != nil) {
+							if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+								var bucket = bucketBase : unmanaged Bucket(keyType, valType);
+								for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
+								bucket.lock.write(E_AVAIL);
+							} else if (bucketBase.lock.read() == P_INNER) {
+								started.add(1);
+								workList.push(bucketBase);
+							} else {
+								// Handle Deferred
+								// Is Queue the right structure? (Cannot delete an element in the middle)
+							}
+						}
+					}
+				} else {
+					// Termination Detection. (Is it needed?)
+					break;
 				}
 			}
 		}
@@ -458,48 +518,69 @@ proc main() {
 	var timer = new Timer();
 	// Use map as an integer-based set
 
-	var set : domain(int, parSafe=true);
-	for i in 1..(max(uint(8)):int) {
-		set += i;
-	}
+	// var set : domain(int, parSafe=true);
+	// for i in 1..(max(uint(8)):int) {
+	// 	set += i;
+	// }
+	// timer.start();
+	// coforall tid in 1..here.maxTaskPar with (ref set) {
+	// 	var rng = new RandomStream(real);
+	// 	var keyRng = new RandomStream(int);
+	// 	for i in 1..N {
+	// 		var key = keyRng.getNext(0, max(uint(8)):int);
+	// 		var s = rng.getNext();
+	// 		if s < 0.33 {
+	// 			set += key;
+	// 		} else if s < 0.66 {
+	// 			set -= key;
+	// 		} else {
+	// 			set.contains(key);
+	// 		}
+	// 	}
+	// }
+	// timer.stop();
+	// writeln("Assocaitive Array: ", timer.elapsed());
+	// timer.clear();
+
+	// map.insert(1..(max(uint(8)):int), 0);
+	// timer.start();
+	// coforall tid in 1..here.maxTaskPar {
+	// 	var rng = new RandomStream(real);
+	// 	var keyRng = new RandomStream(int);
+	// 	for i in 1..N {
+	// 		var s = rng.getNext();
+	// 		var key = keyRng.getNext(0, max(uint(8)):int);
+	// 		if s < 0.33 {
+	// 			map.insert(key,i);
+	// 		} else if s < 0.66 {
+	// 			map.erase(key);
+	// 		} else {
+	// 			map.find(key);
+	// 		}
+	// 	}
+	// }
+	// timer.stop();
+	// writeln("Concurrent Map: ", timer.elapsed());
+	// timer.clear();
+
+	forall i in 1..N do map.insert(i, i);
+
 	timer.start();
-	coforall tid in 1..here.maxTaskPar with (ref set) {
-		var rng = new RandomStream(real);
-		var keyRng = new RandomStream(int);
-		for i in 1..N {
-			var key = keyRng.getNext(0, max(uint(8)):int);
-			var s = rng.getNext();
-			if s < 0.33 {
-				set += key;
-			} else if s < 0.66 {
-				set -= key;
-			} else {
-				set.contains(key);
-			}
-		}
+	var count : atomic int;
+	for i in map {
+		count.add(1);
 	}
 	timer.stop();
-	writeln("Assocaitive Array: ", timer.elapsed());
+	writeln("Serial iteration: " + timer.elapsed():string);
+	writeln("Serial iteration visited: " + count:string);
 	timer.clear();
 
-	map.insert(1..(max(uint(8)):int), 0);
+	count.write(0);
 	timer.start();
-	coforall tid in 1..here.maxTaskPar {
-		var rng = new RandomStream(real);
-		var keyRng = new RandomStream(int);
-		for i in 1..N {
-			var s = rng.getNext();
-			var key = keyRng.getNext(0, max(uint(8)):int);
-			if s < 0.33 {
-				map.insert(key,i);
-			} else if s < 0.66 {
-				map.erase(key);
-			} else {
-				map.find(key);
-			}
-		}
+	forall i in map {
+		count.add(1);
 	}
 	timer.stop();
-	writeln("Concurrent Map: ", timer.elapsed());
-	timer.clear();
+	writeln("Concurrent iteration: " + timer.elapsed():string);
+	writeln("Concurrent iteration visited: " + count:string);
 }
