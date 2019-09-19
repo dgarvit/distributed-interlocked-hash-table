@@ -367,6 +367,7 @@ class ConcurrentMap : Base {
 		tok.pin();
 		var workList = new LockFreeStack(unmanaged Base(keyType, valType)?);
 		var deferred = new LockFreeQueue(deferredType);
+		var deferredFlag = false;
 		var _startIdx = ((iterRNG.getNext())%(root.buckets.size):uint):int;
 		var started : atomic int;
 		var finished : atomic int;
@@ -382,8 +383,9 @@ class ConcurrentMap : Base {
 					started.add(1);
 					workList.push(bucketBase);
 				} else {
-					// Handle Deferred
-					// Is Queue the right structure? (Cannot delete an element in the middle)
+					var deferredElem = (root, idx);
+					deferred.enqueue(deferredElem);
+					// deferredFlag = true;
 				}
 			}
 		}
@@ -407,17 +409,58 @@ class ConcurrentMap : Base {
 								started.add(1);
 								workList.push(bucketBase);
 							} else {
-								// Handle Deferred
-								// Is Queue the right structure? (Cannot delete an element in the middle)
+								var deferredElem = (node, idx);
+								deferred.enqueue(deferredElem);
+								// deferredFlag = true;
 							}
 						}
 					}
 				} else {
-					// Termination Detection. (Is it needed?)
-					break;
+					var startedCount = started.read();
+					var finishedCount = finished.read();
+					if (startedCount == finishedCount) {
+						var _startedCount = started.read();
+						var _finishedCount = finished.read();
+						if (startedCount == _startedCount && finishedCount == _finishedCount) then break;
+					}
 				}
 			}
 		}
+/*
+		if (deferredFlag) {
+			// Handling deferred. Make this serial instead?
+			coforall tid in 1..here.maxTaskPar {
+				while (true) {
+					var (hasNode, head) = deferred.dequeue();
+					if (hasNode) {
+						var pList = head.val[1];
+						var idx = head.val[2];
+						var bucketBase = pList.buckets[idx].read();
+						var next = head.next;
+						if (bucketBase.lock.read() == P_INNER) {
+							curr = bucketBase : unmanaged Buckets(keyType, valType);
+							start = ((iterRNG.getNext())%(curr.size):uint):int;
+							startIndex = 0;
+							continueFlag = true;
+							break;
+						} else if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+							var bucket = bucketBase : unmanaged Bucket(keyType, valType);
+							for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
+							bucket.lock.write(E_AVAIL);
+						} else {
+							// Pushing back to queue
+							deferred.enqueue(head);
+						}
+
+						// Back off?
+
+					} else {
+						// Termination detection?
+						break;
+					}
+				}
+			}
+		}*/
 		tok.unpin();
 	}
 
@@ -563,12 +606,25 @@ proc main() {
 	// writeln("Concurrent Map: ", timer.elapsed());
 	// timer.clear();
 
+	timer.start();
 	forall i in 1..N do map.insert(i, i);
+	timer.stop();
+	writeln("Insertion: " + timer.elapsed():string);
+	timer.clear();
+
+	var count : atomic int;
+	timer.start();
+	forall i in map {
+		// count.add(1);
+	}
+	timer.stop();
+	writeln("Concurrent iteration: " + timer.elapsed():string);
+	writeln("Concurrent iteration visited: " + count:string);
+	timer.clear();
 
 	timer.start();
-	var count : atomic int;
 	for i in map {
-		count.add(1);
+		// count.add(1);
 	}
 	timer.stop();
 	writeln("Serial iteration: " + timer.elapsed():string);
@@ -576,11 +632,5 @@ proc main() {
 	timer.clear();
 
 	count.write(0);
-	timer.start();
-	forall i in map {
-		count.add(1);
-	}
-	timer.stop();
-	writeln("Concurrent iteration: " + timer.elapsed():string);
-	writeln("Concurrent iteration visited: " + count:string);
+	
 }
