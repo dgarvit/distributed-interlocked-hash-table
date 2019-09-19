@@ -301,13 +301,13 @@ class ConcurrentMap : Base {
 				var bucketBase = curr.buckets[idx].read();
 				if (bucketBase != nil) {
 					if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
-						var bucket = bucketBase : unmanaged Bucket(keyType, valType);
+						var bucket = bucketBase : unmanaged Bucket(keyType, valType)?;
 						for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
 						bucket.lock.write(E_AVAIL);
 					} else if (bucketBase.lock.read() == P_INNER) {
 						var stackElem = (curr, start, i);
 						recursionStack.push(stackElem);
-						curr = bucketBase : unmanaged Buckets(keyType, valType);
+						curr = bucketBase : unmanaged Buckets(keyType, valType)?;
 						start = ((iterRNG.getNext())%(curr.buckets.size):uint):int;
 						startIndex = 0;
 						restore = false;
@@ -339,14 +339,14 @@ class ConcurrentMap : Base {
 						var next = head.next;
 						if (bucketBase.lock.read() == P_INNER) {
 							delete head;
-							curr = bucketBase : unmanaged Buckets(keyType, valType);
+							curr = bucketBase : unmanaged Buckets(keyType, valType)?;
 							start = ((iterRNG.getNext())%(curr.size):uint):int;
 							startIndex = 0;
 							continueFlag = true;
 							break;
 						} else if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
 							delete head;
-							var bucket = bucketBase : unmanaged Bucket(keyType, valType);
+							var bucket = bucketBase : unmanaged Bucket(keyType, valType)?;
 							for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
 							bucket.lock.write(E_AVAIL);
 						}
@@ -366,6 +366,7 @@ class ConcurrentMap : Base {
 		var tok = getToken();
 		tok.pin();
 		var workList = new LockFreeStack(deferredType);
+		var workListTok : owned TokenWrapper = workList.getToken();
 		var deferred = new LockFreeQueue(deferredType);
 		// var deferredFlag = false;
 		var _startIdx = ((iterRNG.getNext())%(root.buckets.size):uint):int;
@@ -377,15 +378,17 @@ class ConcurrentMap : Base {
 			if (bucketBase != nil) {
 				started.add(1);
 				var workElem = (root, idx);
-				workList.push(workElem);
+				workList.push(workElem, workListTok);
 			}
 		}
 
 		coforall tid in 1..here.maxTaskPar {
+			var workListTok : owned TokenWrapper = workList.getToken();
+			var deferredTok : owned TokenWrapper = deferred.getToken();
 			while (true) {
-				var (hasNode, _node) = workList.pop();
+				var (hasNode, _node) = workList.pop(workListTok);
 				if (!hasNode) {
-					(hasNode, _node) = deferred.dequeue();
+					// (hasNode, _node) = deferred.dequeue(deferredTok);
 					if (!hasNode) {
 						var startedCount = started.read();
 						var finishedCount = finished.read();
@@ -394,20 +397,21 @@ class ConcurrentMap : Base {
 							var _finishedCount = finished.read();
 							if (startedCount == _startedCount && finishedCount == _finishedCount) then break;
 							else continue;
-						}
+						} else continue;
 					}
 				}
 
 				finished.add(1);
-				var node = _node[1] : unmanaged Buckets(keyType, valType);
+				var node = _node[1];
+				if (node == nil) then writeln("hasNode: " + hasNode:string + " is nil");
 				var nodeIdx = _node[2];
 				var bucketBase = node.buckets[nodeIdx].read();
 				if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
-					var bucket = bucketBase : unmanaged Bucket(keyType, valType);
+					var bucket = bucketBase : unmanaged Bucket(keyType, valType)?;
 					for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
 					bucket.lock.write(E_AVAIL);
 				} else if (bucketBase.lock.read() == P_INNER) {
-					var bucket = bucketBase : unmanaged Buckets(keyType, valType);
+					var bucket = bucketBase : unmanaged Buckets(keyType, valType)?;
 					var startIdx = ((iterRNG.getNext())%(node.buckets.size):uint):int;
 					for i in 0..(bucket.buckets.size-1) {
 						var idx = (startIdx + i)%bucket.buckets.size;
@@ -415,13 +419,13 @@ class ConcurrentMap : Base {
 						if (bucketBase != nil) {
 							started.add(1);
 							var workElem = (bucket, idx);
-							workList.push(workElem);
+							workList.push(workElem, workListTok);
 						}
 					}
 				} else {
 					var deferredElem = (node, nodeIdx);
 					started.add(1);
-					deferred.enqueue(deferredElem);
+					deferred.enqueue(deferredElem, deferredTok);
 					// deferredFlag = true;
 				}
 			}
@@ -572,7 +576,9 @@ proc main() {
 	// timer.clear();
 
 	timer.start();
-	forall i in 1..N do map.insert(i, i);
+	forall i in 1..N with (var tok = map.getToken()) {
+		map.insert(i, i, tok);
+	}
 	timer.stop();
 	writeln("Insertion: " + timer.elapsed():string);
 	timer.clear();
