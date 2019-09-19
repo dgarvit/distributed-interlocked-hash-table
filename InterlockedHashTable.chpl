@@ -362,12 +362,12 @@ class ConcurrentMap : Base {
 		tok.unpin();
 	}
 
-	iter these(param tag:iterKind) where tag == iterKind.standalone {// : (keyType, valType) {
+	iter these(param tag:iterKind) where tag == iterKind.standalone {
 		var tok = getToken();
 		tok.pin();
-		var workList = new LockFreeStack(unmanaged Base(keyType, valType)?);
+		var workList = new LockFreeStack(deferredType);
 		var deferred = new LockFreeQueue(deferredType);
-		var deferredFlag = false;
+		// var deferredFlag = false;
 		var _startIdx = ((iterRNG.getNext())%(root.buckets.size):uint):int;
 		var started : atomic int;
 		var finished : atomic int;
@@ -375,92 +375,57 @@ class ConcurrentMap : Base {
 			var idx = (_startIdx + i)%root.buckets.size;
 			var bucketBase = root.buckets[idx].read();
 			if (bucketBase != nil) {
-				if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
-					var bucket = bucketBase : unmanaged Bucket(keyType, valType);
-					for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
-					bucket.lock.write(E_AVAIL);
-				} else if (bucketBase.lock.read() == P_INNER) {
-					started.add(1);
-					workList.push(bucketBase);
-				} else {
-					var deferredElem = (root, idx);
-					deferred.enqueue(deferredElem);
-					// deferredFlag = true;
-				}
+				started.add(1);
+				var workElem = (root, idx);
+				workList.push(workElem);
 			}
 		}
 
 		coforall tid in 1..here.maxTaskPar {
 			while (true) {
 				var (hasNode, _node) = workList.pop();
-				if (hasNode) {
-					finished.add(1);
-					var node = _node : unmanaged Buckets(keyType, valType);
+				if (!hasNode) {
+					(hasNode, _node) = deferred.dequeue();
+					if (!hasNode) {
+						var startedCount = started.read();
+						var finishedCount = finished.read();
+						if (startedCount == finishedCount) {
+							var _startedCount = started.read();
+							var _finishedCount = finished.read();
+							if (startedCount == _startedCount && finishedCount == _finishedCount) then break;
+							else continue;
+						}
+					}
+				}
+
+				finished.add(1);
+				var node = _node[1] : unmanaged Buckets(keyType, valType);
+				var nodeIdx = _node[2];
+				var bucketBase = node.buckets[nodeIdx].read();
+				if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+					var bucket = bucketBase : unmanaged Bucket(keyType, valType);
+					for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
+					bucket.lock.write(E_AVAIL);
+				} else if (bucketBase.lock.read() == P_INNER) {
+					var bucket = bucketBase : unmanaged Buckets(keyType, valType);
 					var startIdx = ((iterRNG.getNext())%(node.buckets.size):uint):int;
-					for i in 0..(node.buckets.size-1) {
-						var idx = (startIdx + i)%node.buckets.size;
-						var bucketBase = node.buckets[idx].read();
+					for i in 0..(bucket.buckets.size-1) {
+						var idx = (startIdx + i)%bucket.buckets.size;
+						var bucketBase = bucket.buckets[idx].read();
 						if (bucketBase != nil) {
-							if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
-								var bucket = bucketBase : unmanaged Bucket(keyType, valType);
-								for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
-								bucket.lock.write(E_AVAIL);
-							} else if (bucketBase.lock.read() == P_INNER) {
-								started.add(1);
-								workList.push(bucketBase);
-							} else {
-								var deferredElem = (node, idx);
-								deferred.enqueue(deferredElem);
-								// deferredFlag = true;
-							}
+							started.add(1);
+							var workElem = (bucket, idx);
+							workList.push(workElem);
 						}
 					}
 				} else {
-					var startedCount = started.read();
-					var finishedCount = finished.read();
-					if (startedCount == finishedCount) {
-						var _startedCount = started.read();
-						var _finishedCount = finished.read();
-						if (startedCount == _startedCount && finishedCount == _finishedCount) then break;
-					}
+					var deferredElem = (node, nodeIdx);
+					started.add(1);
+					deferred.enqueue(deferredElem);
+					// deferredFlag = true;
 				}
 			}
 		}
-/*
-		if (deferredFlag) {
-			// Handling deferred. Make this serial instead?
-			coforall tid in 1..here.maxTaskPar {
-				while (true) {
-					var (hasNode, head) = deferred.dequeue();
-					if (hasNode) {
-						var pList = head.val[1];
-						var idx = head.val[2];
-						var bucketBase = pList.buckets[idx].read();
-						var next = head.next;
-						if (bucketBase.lock.read() == P_INNER) {
-							curr = bucketBase : unmanaged Buckets(keyType, valType);
-							start = ((iterRNG.getNext())%(curr.size):uint):int;
-							startIndex = 0;
-							continueFlag = true;
-							break;
-						} else if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
-							var bucket = bucketBase : unmanaged Bucket(keyType, valType);
-							for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
-							bucket.lock.write(E_AVAIL);
-						} else {
-							// Pushing back to queue
-							deferred.enqueue(head);
-						}
-
-						// Back off?
-
-					} else {
-						// Termination detection?
-						break;
-					}
-				}
-			}
-		}*/
 		tok.unpin();
 	}
 
@@ -619,7 +584,7 @@ proc main() {
 	}
 	timer.stop();
 	writeln("Concurrent iteration: " + timer.elapsed():string);
-	writeln("Concurrent iteration visited: " + count:string);
+	// writeln("Concurrent iteration visited: " + count:string);
 	timer.clear();
 
 	timer.start();
@@ -628,7 +593,7 @@ proc main() {
 	}
 	timer.stop();
 	writeln("Serial iteration: " + timer.elapsed():string);
-	writeln("Serial iteration visited: " + count:string);
+	// writeln("Serial iteration visited: " + count:string);
 	timer.clear();
 
 	count.write(0);
