@@ -577,7 +577,8 @@ class ConcurrentMap : Base {
 
 		if elist.count == 0 {
 			pList.buckets[idx].write(nil);
-			delete elist;
+			elist.lock.write(GARBAGE);
+			tok.deferDelete(elist);
 		} else elist.lock.write(E_AVAIL);
 		tok.unpin();
 		return res;
@@ -622,82 +623,82 @@ proc main() {
 	var timer = new Timer();
 	// Use map as an integer-based set
 
-	// var set : domain(int, parSafe=true);
-	// for i in 1..(max(uint(8)):int) {
-	// 	set += i;
-	// }
+	var set : domain(int, parSafe=true);
+	for i in 1..(max(uint(8)):int) {
+		set += i;
+	}
+	timer.start();
+	coforall tid in 1..here.maxTaskPar with (ref set) {
+		var rng = new RandomStream(real);
+		var keyRng = new RandomStream(int);
+		for i in 1..N {
+			var key = keyRng.getNext(0, max(uint(8)):int);
+			var s = rng.getNext();
+			if s < 0.33 {
+				set += key;
+			} else if s < 0.66 {
+				set -= key;
+			} else {
+				set.contains(key);
+			}
+		}
+	}
+	timer.stop();
+	writeln("Assocaitive Array: ", timer.elapsed());
+	timer.clear();
+
+	map.insert(1..(max(uint(8)):int), 0);
+	timer.start();
+	coforall tid in 1..here.maxTaskPar {
+		var rng = new RandomStream(real);
+		var keyRng = new RandomStream(int);
+		for i in 1..N {
+			var s = rng.getNext();
+			var key = keyRng.getNext(0, max(uint(8)):int);
+			if s < 0.33 {
+				map.insert(key,i);
+			} else if s < 0.66 {
+				map.erase(key);
+			} else {
+				map.find(key);
+			}
+		}
+	}
+	timer.stop();
+	writeln("Concurrent Map: ", timer.elapsed());
+	timer.clear();
+	// use Memory;
 	// timer.start();
-	// coforall tid in 1..here.maxTaskPar with (ref set) {
-	// 	var rng = new RandomStream(real);
-	// 	var keyRng = new RandomStream(int);
-	// 	for i in 1..N {
-	// 		var key = keyRng.getNext(0, max(uint(8)):int);
-	// 		var s = rng.getNext();
-	// 		if s < 0.33 {
-	// 			set += key;
-	// 		} else if s < 0.66 {
-	// 			set -= key;
-	// 		} else {
-	// 			set.contains(key);
-	// 		}
-	// 	}
+	// forall i in 1..N with (var tok = map.getToken()) {
+	// 	map.insert(i, i, tok);
 	// }
 	// timer.stop();
-	// writeln("Assocaitive Array: ", timer.elapsed());
+	// writeln("Insertion: " + timer.elapsed():string);
 	// timer.clear();
+	// writeln("Memory Used: " + memoryUsed():string);
 
-	// map.insert(1..(max(uint(8)):int), 0);
 	// timer.start();
-	// coforall tid in 1..here.maxTaskPar {
-	// 	var rng = new RandomStream(real);
-	// 	var keyRng = new RandomStream(int);
-	// 	for i in 1..N {
-	// 		var s = rng.getNext();
-	// 		var key = keyRng.getNext(0, max(uint(8)):int);
-	// 		if s < 0.33 {
-	// 			map.insert(key,i);
-	// 		} else if s < 0.66 {
-	// 			map.erase(key);
-	// 		} else {
-	// 			map.find(key);
-	// 		}
-	// 	}
+	// forall i in 1..N/2 with (var tok = map.getToken()) {
+	// 	if (!map.erase(i, tok)) then writeln("Failed");
 	// }
 	// timer.stop();
-	// writeln("Concurrent Map: ", timer.elapsed());
+	// writeln("Erase: " + timer.elapsed():string);
 	// timer.clear();
-	use Memory;
-	timer.start();
-	forall i in 1..N with (var tok = map.getToken()) {
-		map.insert(i, i, tok);
-	}
-	timer.stop();
-	writeln("Insertion: " + timer.elapsed():string);
-	timer.clear();
-	writeln("Memory Used: " + memoryUsed():string);
+	// writeln("Memory Used: " + memoryUsed():string);
 
-	timer.start();
-	forall i in 1..N/2 with (var tok = map.getToken()) {
-		if (!map.erase(i, tok)) then writeln("Failed");
-	}
-	timer.stop();
-	writeln("Erase: " + timer.elapsed():string);
-	timer.clear();
-	writeln("Memory Used: " + memoryUsed():string);
+	// timer.start();
+	// forall i in map {
+	// 	sleep(10, TimeUnits.microseconds);
+	// }
+	// timer.stop();
+	// writeln("Concurrent iteration: " + timer.elapsed():string);
+	// timer.clear();
 
-	timer.start();
-	forall i in map {
-		sleep(10, TimeUnits.microseconds);
-	}
-	timer.stop();
-	writeln("Concurrent iteration: " + timer.elapsed():string);
-	timer.clear();
-
-	timer.start();
-	for i in map {
-		sleep(10, TimeUnits.microseconds);
-	}
-	timer.stop();
-	writeln("Serial iteration: " + timer.elapsed():string);
-	timer.clear();
+	// timer.start();
+	// for i in map {
+	// 	sleep(10, TimeUnits.microseconds);
+	// }
+	// timer.stop();
+	// writeln("Serial iteration: " + timer.elapsed():string);
+	// timer.clear();
 }
