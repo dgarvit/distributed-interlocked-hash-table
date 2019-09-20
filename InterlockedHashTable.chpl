@@ -196,6 +196,7 @@ class ConcurrentMap : Base {
 	var iterRNG = new owned RandomStream(uint(64), parSafe=true);
 	type stackType = (unmanaged Buckets(keyType, valType)?, int, int);
 	type deferredType = (unmanaged Buckets(keyType, valType)?, int);
+	type PEListType = (unmanaged Bucket(keyType, valType)?, unmanaged Buckets(keyType, valType)?, int);
 
 	proc init(type keyType, type valType) {
 		super.init(keyType, valType);
@@ -278,6 +279,81 @@ class ConcurrentMap : Base {
 			shouldYield = true;
 		}
 		return nil;
+	}
+
+	// temporary function to facilitate deletion of EList
+	proc getPEList(key : keyType, isInsertion : bool, tok : owned TokenWrapper) : PEListType {
+		var found : unmanaged Bucket(keyType, valType)?;
+		var retNil : PEListType?;
+		var curr = root;
+		var shouldYield = false;
+		while (true) {
+			var idx = (curr.hash(key) % (curr.buckets.size):uint):int;
+			var next = curr.buckets[idx].read();
+			// writeln("stuck");
+			if (next == nil) {
+				// If we're not inserting something, I.E we are removing 
+				// or retreiving, we are done.
+				if !isInsertion then return retNil;
+
+				// Otherwise, speculatively create a new bucket to add in.
+				var newList = new unmanaged Bucket(curr);
+				newList.lock.write(E_LOCK);
+
+				// We set our Bucket, we also own it so return it
+				if (curr.buckets[idx].compareAndSwap(nil, newList)) {
+					return (newList, curr, idx);
+				} else {
+					// Someone else set their bucket, reload.
+					delete newList;
+				}
+			}
+			else if (next.lock.read() == P_INNER) {
+				curr = next : unmanaged Buckets(keyType, valType);
+			}
+			else if (next.lock.read() == E_AVAIL) {
+				// We now own the bucket...
+				if (next.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+					// Non-insertions don't care.
+					if !isInsertion then return (next : unmanaged Bucket(keyType, valType), curr, idx);
+					// Insertions cannot have a full bucket...
+					// If it is not full return it
+					var bucket = next : unmanaged Bucket(keyType, valType)?;
+					if bucket.count < BUCKET_NUM_ELEMS then
+						return (bucket, curr, idx);
+
+					for k in bucket.keys {
+						if k == key {
+							return (bucket, curr, idx);
+						}
+					}
+
+					// writeln(bucket.count);
+					// Rehash into new Buckets
+					var newBuckets = new unmanaged Buckets(curr);
+					for (k,v) in zip(bucket.keys, bucket.values) {
+						var idx = (newBuckets.hash(k) % newBuckets.size:uint):int;
+						if newBuckets.buckets[idx].read() == nil {
+							newBuckets.buckets[idx].write(new unmanaged Bucket(newBuckets));
+						}
+						var buck = newBuckets.buckets[idx].read() : unmanaged Bucket(keyType, valType)?;
+						buck.count += 1;
+						buck.keys[buck.count] = k;
+						buck.values[buck.count] = v;
+					}
+
+					// TODO: Need to pass this to 'EpochManager.deferDelete'
+					next.lock.write(GARBAGE);
+					tok.deferDelete(next);
+					curr.buckets[idx].write(newBuckets: unmanaged Base(keyType, valType));
+					curr = newBuckets;
+				}
+			}
+
+			if shouldYield then chpl_task_yield(); // If lock could not be acquired
+			shouldYield = true;
+		}
+		return retNil;
 	}
 
 	// TODO: RAII based Locks.
@@ -485,7 +561,7 @@ class ConcurrentMap : Base {
 
 	proc erase(key : keyType, tok : owned TokenWrapper = getToken()) : bool {
 		tok.pin();
-		var elist = getEList(key, false, tok);
+		var (elist, pList, idx) = getPEList(key, false, tok);
 		if (elist == nil) then return false;
 		var res = false;
 		for i in 1..elist.count {
@@ -499,7 +575,10 @@ class ConcurrentMap : Base {
 			}
 		}
 
-		elist.lock.write(E_AVAIL);
+		if elist.count == 0 {
+			pList.buckets[idx].write(nil);
+			delete elist;
+		} else elist.lock.write(E_AVAIL);
 		tok.unpin();
 		return res;
 	}
@@ -587,7 +666,7 @@ proc main() {
 	// timer.stop();
 	// writeln("Concurrent Map: ", timer.elapsed());
 	// timer.clear();
-
+	use Memory;
 	timer.start();
 	forall i in 1..N with (var tok = map.getToken()) {
 		map.insert(i, i, tok);
@@ -595,6 +674,16 @@ proc main() {
 	timer.stop();
 	writeln("Insertion: " + timer.elapsed():string);
 	timer.clear();
+	writeln("Memory Used: " + memoryUsed():string);
+
+	timer.start();
+	forall i in 1..N/2 with (var tok = map.getToken()) {
+		if (!map.erase(i, tok)) then writeln("Failed");
+	}
+	timer.stop();
+	writeln("Erase: " + timer.elapsed():string);
+	timer.clear();
+	writeln("Memory Used: " + memoryUsed():string);
 
 	timer.start();
 	forall i in map {
