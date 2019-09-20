@@ -365,8 +365,8 @@ class ConcurrentMap : Base {
 	iter these(param tag:iterKind) where tag == iterKind.standalone {
 		var tok = getToken();
 		tok.pin();
-		var workList = new LockFreeStack(deferredType);
-		var workListTok : owned TokenWrapper = workList.getToken();
+		var workList = new LockFreeQueue(unmanaged Buckets(keyType, valType)?);
+		var _workListTok : owned TokenWrapper = workList.getToken();
 		var deferred = new LockFreeQueue(deferredType);
 		// var deferredFlag = false;
 		var _startIdx = ((iterRNG.getNext())%(root.buckets.size):uint):int;
@@ -376,9 +376,18 @@ class ConcurrentMap : Base {
 			var idx = (_startIdx + i)%root.buckets.size;
 			var bucketBase = root.buckets[idx].read();
 			if (bucketBase != nil) {
-				started.add(1);
-				var workElem = (root, idx);
-				workList.push(workElem, workListTok);
+				if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+					var bucket = bucketBase : unmanaged Bucket(keyType, valType)?;
+					for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
+					bucket.lock.write(E_AVAIL);
+				} else if (bucketBase.lock.read() == P_INNER) {
+					var bucket = bucketBase : unmanaged Buckets(keyType, valType)?;
+					started.add(1);
+					// var workElem = (root, idx);
+					workList.enqueue(bucket, _workListTok);
+				} else {
+					// deferred
+				}
 			}
 		}
 
@@ -386,50 +395,37 @@ class ConcurrentMap : Base {
 			var workListTok : owned TokenWrapper = workList.getToken();
 			var deferredTok : owned TokenWrapper = deferred.getToken();
 			while (true) {
-				var (hasNode, _node) = workList.pop(workListTok);
+				var (hasNode, _node) = workList.dequeue(workListTok);
 				if (!hasNode) {
 					// (hasNode, _node) = deferred.dequeue(deferredTok);
-					if (!hasNode) {
-						var startedCount = started.read();
-						var finishedCount = finished.read();
-						if (startedCount == finishedCount) {
-							var _startedCount = started.read();
-							var _finishedCount = finished.read();
-							if (startedCount == _startedCount && finishedCount == _finishedCount) then break;
-							else continue;
-						} else continue;
-					}
+					if (started.read() == finished.read()) then break;
+					else continue;
+					break;
 				}
 
 				finished.add(1);
-				var node = _node[1];
-				if (node == nil) then writeln("hasNode: " + hasNode:string + " is nil");
-				var nodeIdx = _node[2];
-				var bucketBase = node.buckets[nodeIdx].read();
-				if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
-					var bucket = bucketBase : unmanaged Bucket(keyType, valType)?;
-					for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
-					bucket.lock.write(E_AVAIL);
-				} else if (bucketBase.lock.read() == P_INNER) {
-					var bucket = bucketBase : unmanaged Buckets(keyType, valType)?;
-					var startIdx = ((iterRNG.getNext())%(node.buckets.size):uint):int;
-					for i in 0..(bucket.buckets.size-1) {
-						var idx = (startIdx + i)%bucket.buckets.size;
-						var bucketBase = bucket.buckets[idx].read();
-						if (bucketBase != nil) {
+				var startIdx = ((iterRNG.getNext())%(_node.buckets.size):uint):int;
+				for i in 0..(_node.buckets.size-1) {
+					var idx = (startIdx + i)%_node.buckets.size;
+					var bucketBase = _node.buckets[idx].read();
+					if (bucketBase != nil) {
+						if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+							var bucket = bucketBase : unmanaged Bucket(keyType, valType)?;
+							for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
+							bucket.lock.write(E_AVAIL);
+						} else if (bucketBase.lock.read() == P_INNER) {
+							var bucket = bucketBase : unmanaged Buckets(keyType, valType)?;
 							started.add(1);
-							var workElem = (bucket, idx);
-							workList.push(workElem, workListTok);
+							// var workElem = (_node, idx);
+							workList.enqueue(bucket);
+						} else {
+							// deferred
 						}
 					}
-				} else {
-					var deferredElem = (node, nodeIdx);
-					started.add(1);
-					deferred.enqueue(deferredElem, deferredTok);
-					// deferredFlag = true;
 				}
 			}
 		}
+
 		tok.unpin();
 	}
 
@@ -605,3 +601,8 @@ proc main() {
 	count.write(0);
 	
 }
+
+//  aprun -q -cc none -d24 -n1 -N1 -j0 ./temp_real --N=16777216 --DEFAULT_NUM_BUCKETS=2048 -nl 1 
+// Insertion: 1.02522
+// Concurrent iteration: 0.044324
+// Serial iteration: 1.93264
