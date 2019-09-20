@@ -367,11 +367,12 @@ class ConcurrentMap : Base {
 		tok.pin();
 		var workList = new LockFreeQueue(unmanaged Buckets(keyType, valType)?);
 		var _workListTok : owned TokenWrapper = workList.getToken();
-		var deferred = new LockFreeQueue(deferredType);
-		// var deferredFlag = false;
+		var deferredList = new LockFreeQueue(deferredType);
+		var _deferredListTok : owned TokenWrapper = deferredList.getToken();
 		var _startIdx = ((iterRNG.getNext())%(root.buckets.size):uint):int;
 		var started : atomic int;
 		var finished : atomic int;
+
 		for i in 0..(root.buckets.size-1) {
 			var idx = (_startIdx + i)%root.buckets.size;
 			var bucketBase = root.buckets[idx].read();
@@ -383,27 +384,43 @@ class ConcurrentMap : Base {
 				} else if (bucketBase.lock.read() == P_INNER) {
 					var bucket = bucketBase : unmanaged Buckets(keyType, valType)?;
 					started.add(1);
-					// var workElem = (root, idx);
 					workList.enqueue(bucket, _workListTok);
 				} else {
-					// deferred
+					var deferredElem = (root, idx);
+					deferredList.enqueue(deferredElem, _deferredListTok);
 				}
 			}
 		}
 
 		coforall tid in 1..here.maxTaskPar {
 			var workListTok : owned TokenWrapper = workList.getToken();
-			var deferredTok : owned TokenWrapper = deferred.getToken();
+			var deferredListTok : owned TokenWrapper = deferredList.getToken();
 			while (true) {
 				var (hasNode, _node) = workList.dequeue(workListTok);
 				if (!hasNode) {
-					// (hasNode, _node) = deferred.dequeue(deferredTok);
-					if (started.read() == finished.read()) then break;
-					else continue;
-					break;
-				}
+					var (hasDeferredNode, deferredNode) = deferredList.dequeue(deferredListTok);
+					if (!hasDeferredNode) {
+						if (started.read() == finished.read()) then break;
+						else continue;
+					}
+					var pList = deferredNode[1];
+					var idx = deferredNode[2];
+					var bucketBase = pList.buckets[idx].read();
+					if (bucketBase != nil) {
+						if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+							var bucket = bucketBase : unmanaged Bucket(keyType, valType)?;
+							for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
+							bucket.lock.write(E_AVAIL);
+							continue;
+						} else if (bucketBase.lock.read() == P_INNER) {
+							_node = bucketBase : unmanaged Buckets(keyType, valType)?;
+						} else {
+							deferredList.enqueue(deferredNode, deferredListTok);
+							continue;
+						}
+					}
+				} else finished.add(1);
 
-				finished.add(1);
 				var startIdx = ((iterRNG.getNext())%(_node.buckets.size):uint):int;
 				for i in 0..(_node.buckets.size-1) {
 					var idx = (startIdx + i)%_node.buckets.size;
@@ -416,10 +433,10 @@ class ConcurrentMap : Base {
 						} else if (bucketBase.lock.read() == P_INNER) {
 							var bucket = bucketBase : unmanaged Buckets(keyType, valType)?;
 							started.add(1);
-							// var workElem = (_node, idx);
 							workList.enqueue(bucket);
 						} else {
-							// deferred
+							var deferredElem = (_node, idx);
+							deferredList.enqueue(deferredElem, deferredListTok);
 						}
 					}
 				}
@@ -579,30 +596,19 @@ proc main() {
 	writeln("Insertion: " + timer.elapsed():string);
 	timer.clear();
 
-	var count : atomic int;
 	timer.start();
 	forall i in map {
-		// count.add(1);
+		sleep(10, TimeUnits.microseconds);
 	}
 	timer.stop();
 	writeln("Concurrent iteration: " + timer.elapsed():string);
-	// writeln("Concurrent iteration visited: " + count:string);
 	timer.clear();
 
 	timer.start();
 	for i in map {
-		// count.add(1);
+		sleep(10, TimeUnits.microseconds);
 	}
 	timer.stop();
 	writeln("Serial iteration: " + timer.elapsed():string);
-	// writeln("Serial iteration visited: " + count:string);
 	timer.clear();
-
-	count.write(0);
-	
 }
-
-//  aprun -q -cc none -d24 -n1 -N1 -j0 ./temp_real --N=16777216 --DEFAULT_NUM_BUCKETS=2048 -nl 1 
-// Insertion: 1.02522
-// Concurrent iteration: 0.044324
-// Serial iteration: 1.93264
