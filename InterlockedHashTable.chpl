@@ -589,42 +589,15 @@ class ConcurrentMap : Base {
 	}
 }
 
-config const N = 1024 * 32;
-proc main() {
-	var map = new ConcurrentMap(int, int);
-	// var dist : [0..#DEFAULT_NUM_BUCKETS] int;
-	// for i in 1..N {
-	// 	map.insert(i, i**2);
-	// }
+config const N = 1024;
+use Time;
 
-	// forall i in 1..1000 {
-	// 	writeln(map.find(i));
-	// }
-
-
-	// visit(map.root);
-	// for (x,y) in zip(hist, histDom) do writeln("[" + y:string + "]: " + x:string);
-	// var count = 0;
-	// for i in map {
-	// 	count += 1;
-	// }
-	// writeln("Iterated elements: " + count:string);
-	// writeln("Total elements in map: " + map.size:string);
-
-	// for i in 1..N {
-	// 	assert(map.find(i)[1], "Missing ", i);
-	// }
-
-	// forall i in 1..N {
-	// 	map.erase(i);
-	// }
-
-	use Time;
-	var timer = new Timer();
+proc randomOpsBenchmark (maxLimit : uint = max(uint(16))) {
 	// Use map as an integer-based set
-
+	writeln("Random operations test: ");
+	var timer = new Timer();
 	var set : domain(int, parSafe=true);
-	for i in 1..(max(uint(8)):int) {
+	for i in 1..(maxLimit:int) {
 		set += i;
 	}
 	timer.start();
@@ -632,7 +605,7 @@ proc main() {
 		var rng = new RandomStream(real);
 		var keyRng = new RandomStream(int);
 		for i in 1..N {
-			var key = keyRng.getNext(0, max(uint(8)):int);
+			var key = keyRng.getNext(0, maxLimit:int);
 			var s = rng.getNext();
 			if s < 0.33 {
 				set += key;
@@ -647,58 +620,68 @@ proc main() {
 	writeln("Assocaitive Array: ", timer.elapsed());
 	timer.clear();
 
-	map.insert(1..(max(uint(8)):int), 0);
+	var map = new ConcurrentMap(int, int);
+	map.insert(1..(maxLimit:int), 0);
 	timer.start();
 	coforall tid in 1..here.maxTaskPar {
+		var tok = map.getToken();
 		var rng = new RandomStream(real);
 		var keyRng = new RandomStream(int);
 		for i in 1..N {
 			var s = rng.getNext();
-			var key = keyRng.getNext(0, max(uint(8)):int);
+			var key = keyRng.getNext(0, maxLimit:int);
 			if s < 0.33 {
-				map.insert(key,i);
+				map.insert(key,i,tok);
 			} else if s < 0.66 {
-				map.erase(key);
+				map.erase(key, tok);
 			} else {
-				map.find(key);
+				map.find(key, tok);
 			}
 		}
 	}
 	timer.stop();
 	writeln("Concurrent Map: ", timer.elapsed());
 	timer.clear();
-	// use Memory;
-	// timer.start();
-	// forall i in 1..N with (var tok = map.getToken()) {
-	// 	map.insert(i, i, tok);
-	// }
-	// timer.stop();
-	// writeln("Insertion: " + timer.elapsed():string);
-	// timer.clear();
-	// writeln("Memory Used: " + memoryUsed():string);
+	writeln();
+}
 
-	// timer.start();
-	// forall i in 1..N/2 with (var tok = map.getToken()) {
-	// 	if (!map.erase(i, tok)) then writeln("Failed");
-	// }
-	// timer.stop();
-	// writeln("Erase: " + timer.elapsed():string);
-	// timer.clear();
-	// writeln("Memory Used: " + memoryUsed():string);
+proc iterationBenchmark() {
+	writeln("Iteration Test: ");
+	var map = new ConcurrentMap(int, int);
+	var timer = new Timer();
+	timer.start();
+	forall i in map {
+		sleep(10, TimeUnits.microseconds);
+	}
+	timer.stop();
+	writeln("Concurrent iteration: " + timer.elapsed():string);
+	timer.clear();
 
-	// timer.start();
-	// forall i in map {
-	// 	sleep(10, TimeUnits.microseconds);
-	// }
-	// timer.stop();
-	// writeln("Concurrent iteration: " + timer.elapsed():string);
-	// timer.clear();
+	timer.start();
+	for i in map {
+		sleep(10, TimeUnits.microseconds);
+	}
+	timer.stop();
+	writeln("Serial iteration: " + timer.elapsed():string);
+	timer.clear();
+	writeln();
+}
 
-	// timer.start();
+proc main() {
+	randomOpsBenchmark(max(uint(16)));
+	iterationBenchmark();
+	// var map = new ConcurrentMap(int, int);
+	// var dist : [0..#DEFAULT_NUM_BUCKETS] int;
+	// for i in 1..N {
+	// 	map.insert(i, i**2);
+	// }
+
+	// visit(map.root);
+	// for (x,y) in zip(hist, histDom) do writeln("[" + y:string + "]: " + x:string);
+	// var count = 0;
 	// for i in map {
-	// 	sleep(10, TimeUnits.microseconds);
+	// 	count += 1;
 	// }
-	// timer.stop();
-	// writeln("Serial iteration: " + timer.elapsed():string);
-	// timer.clear();
+	// writeln("Iterated elements: " + count:string);
+	// writeln("Total elements in map: " + map.size:string);
 }
