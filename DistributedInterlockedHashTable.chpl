@@ -191,15 +191,15 @@ class Buckets : Base {
 
 pragma "always RVF"
 record DistributedMap {
-	// type keyType;
-	// type valType;
+	type keyType;
+	type valType;
 	// var root : unmanaged Buckets(keyType, valType);
 	var _pid : int = -1;
 	var _manager = new EpochManager();
 	
-	proc init() {
-		// this.keyType = keyType;
-		// this.valType = valType;
+	proc init(type keyType, type valType) {
+		this.keyType = keyType;
+		this.valType = valType;
 		// this.root = new unmanaged Buckets(keyType, valType);
 		this._pid = (new unmanaged DistributedMapImpl()).pid;
 	}
@@ -250,10 +250,11 @@ class DistributedMapImpl {
 }
 
 proc main() {
-	var map = new DistributedMap();
+	var map = new DistributedMap(int, int);
 	var tok = map._manager.register();
+	writeln(map);
+	writeln(map.keyType:string + map.valType:string);
 	coforall loc in Locales do on loc {
-		writeln(loc);
 		writeln(map._manager.allocated_list);
 		var tok = map._manager.register();
 		writeln(tok);
