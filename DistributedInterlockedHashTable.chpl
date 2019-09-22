@@ -3,6 +3,7 @@ use LockFreeStack;
 use LockFreeQueue;
 use EpochManager;
 use Random;
+use BlockDist;
 use VisualDebug;
 
 param BUCKET_UNLOCKED = 0;
@@ -159,7 +160,7 @@ class Buckets : Base {
 	var buckets : [bucketsDom] AtomicObject(unmanaged Base(keyType?, valType?)?, hasABASupport=false, hasGlobalSupport=true);
 	// var buckets : [0..(size-1)] AtomicObject(unmanaged Base(keyType?, valType?)?, hasABASupport=false, hasGlobalSupport=true);
 
-	proc init(type keyType, type valType) {
+	proc init(type keyType, type valType, targetLocales = [here]) {
 		super.init(keyType, valType);
 		this.lock.write(P_INNER);
 		this.seed = seedRNG.getNext();
@@ -167,7 +168,7 @@ class Buckets : Base {
 		this.bucketsDom = {0..#DEFAULT_NUM_BUCKETS};
 	}
 
-	proc init(parent : unmanaged Buckets(?keyType, ?valType)) {
+	proc init(parent : unmanaged Buckets(?keyType, ?valType), targetLocales = [here]) {
 		super.init(keyType, valType);
 		this.seed = seedRNG.getNext();
 		this.lock.write(P_INNER);
@@ -193,14 +194,16 @@ pragma "always RVF"
 record DistributedMap {
 	type keyType;
 	type valType;
-	// var root : unmanaged Buckets(keyType, valType);
+	var rootSeed : uint(64);
+	var bucketsDom = {0..#DEFAULT_NUM_BUCKETS} dmapped Block(boundingBox={0..#DEFAULT_NUM_BUCKETS}, targetLocales=Locales);
+	var rootBuckets : [bucketsDom] AtomicObject(unmanaged Base(keyType?, valType?)?, hasABASupport=false, hasGlobalSupport=true);
 	var _pid : int = -1;
 	var _manager = new EpochManager();
 	
 	proc init(type keyType, type valType) {
 		this.keyType = keyType;
 		this.valType = valType;
-		// this.root = new unmanaged Buckets(keyType, valType);
+		this.rootSeed = seedRNG.getNext();
 		this._pid = (new unmanaged DistributedMapImpl()).pid;
 	}
 
@@ -214,10 +217,9 @@ record DistributedMap {
 }
 
 class DistributedMapImpl {
-	// var root : unmanaged Buckets(keyType, valType)?;
 	var pid : int;
 
-	proc init() { // : unmanaged Buckets(keyType, valType)) {
+	proc init() {
 		// this.keyType = keyType;
 		// this.valType = valType;
 		// super.init(keyType, valType);
@@ -253,7 +255,6 @@ proc main() {
 	var map = new DistributedMap(int, int);
 	var tok = map._manager.register();
 	writeln(map);
-	writeln(map.keyType:string + map.valType:string);
 	coforall loc in Locales do on loc {
 		writeln(map._manager.allocated_list);
 		var tok = map._manager.register();
