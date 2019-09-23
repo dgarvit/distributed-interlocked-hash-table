@@ -190,21 +190,29 @@ class Buckets : Base {
 	// proc size return buckets.size;
 }
 
+// Wrapper for distributed array used for the root; essentially creates a 'lifetime' for the
+// array that we will be keeping a reference to. This makes use of the `pragma "no copy"`
+// compiler directive that disables the implicit deep-copy. This is very 'hacky', but it
+// has served me very well so far.
+class RootBucketsArray {
+	type keyType;
+	type valType;
+	var D = {0..#DEFAULT_NUM_BUCKETS} dmapped Block(boundingBox={0..#DEFAULT_NUM_BUCKETS}, targetLocales=Locales);
+	var A : [D] AtomicObject(unmanaged Base(keyType?, valType?)?, hasABASupport=false, hasGlobalSupport=true);
+}
+
 pragma "always RVF"
 record DistributedMap {
 	type keyType;
 	type valType;
-	var rootSeed : uint(64);
-	var bucketsDom = {0..#DEFAULT_NUM_BUCKETS} dmapped Block(boundingBox={0..#DEFAULT_NUM_BUCKETS}, targetLocales=Locales);
-	var rootBuckets : [bucketsDom] AtomicObject(unmanaged Base(keyType?, valType?)?, hasABASupport=false, hasGlobalSupport=true);
 	var _pid : int = -1;
-	var _manager = new EpochManager();
 	
+
 	proc init(type keyType, type valType) {
 		this.keyType = keyType;
 		this.valType = valType;
-		this.rootSeed = seedRNG.getNext();
-		this._pid = (new unmanaged DistributedMapImpl()).pid;
+		this.complete();
+		this._pid = (new unmanaged DistributedMapImpl(keyType, valType)).pid;
 	}
 
 	proc destroy() {
@@ -213,37 +221,45 @@ record DistributedMap {
 		}
 	}
 
-	forwarding chpl_getPrivatizedCopy(unmanaged DistributedMapImpl, _pid);
+	forwarding chpl_getPrivatizedCopy(unmanaged DistributedMapImpl(keyType, valType), _pid);
 }
 
 class DistributedMapImpl {
+	type keyType;
+	type valType;
 	var pid : int;
+	var rootSeed : uint(64); // Same across all nodes...
+	var rootArray : unmanaged RootBucketsArray(keyType, valType);
+	var rootBuckets = _newArray(rootArray.A._value);
+	var manager : EpochManager;
 
-	proc init() {
-		// this.keyType = keyType;
-		// this.valType = valType;
-		// super.init(keyType, valType);
-		// this.root = root;
+	proc init(type keyType, type valType) {
+		this.keyType = keyType;
+		this.valType = valType;
+		this.rootSeed = seedRNG.getNext();
+		this.rootArray = new unmanaged RootBucketsArray(keyType, valType);
+		this.manager = new EpochManager(); // This will be shared across all instances...
+		// TODO: We need to add a `UninitializedEpochManager` helper function that will not initialize the `record`
+		// since records are initialzied by default in Chapel, regardless of what you want, with no way to avoid this.
+
 		this.complete();
 		this.pid = _newPrivatizedClass(this);
 	}
 
 	proc init(other, privatizedData) {
-		// this.keyType = string;
-		// this.valType = string;
-		// super.init(int, int);
-		writeln(other);
-		this.complete();
-
-		this.pid = privatizedData;
+		this.keyType = other.keyType;
+		this.valType = other.valType;
+		this.pid = privatizedData[1];
+		this.rootArray = privatizedData[3];
+		this.manager = privatizedData[2];
 	}
 
 	proc dsiPrivatize(privatizedData) {
-		return new unmanaged DistributedMapImpl(this, pid);
+		return new unmanaged DistributedMapImpl(this, privatizedData);
 	}
 
 	proc dsiGetPrivatizeData() {
-		return pid;
+		return (pid, manager, rootArray);
 	}
 
 	inline proc getPrivatizedInstance() {
@@ -253,12 +269,13 @@ class DistributedMapImpl {
 
 proc main() {
 	var map = new DistributedMap(int, int);
-	var tok = map._manager.register();
+	var tok = map.manager.register();
 	writeln(map);
+	// Test that on Locales other than 0, that they see the same distributed array
+	forall bucket in map.rootBuckets {
+		bucket.write(new unmanaged Bucket(int, int));
+	}
 	coforall loc in Locales do on loc {
-		writeln(map._manager.allocated_list);
-		var tok = map._manager.register();
-		writeln(tok);
-		writeln();
+		assert(&& reduce (map.rootBuckets.read() != nil), here, " has a nil bucket!");
 	}
 }
