@@ -428,10 +428,8 @@ class DistributedMapImpl {
 		var resVal : valType?;
 		on this.rootBuckets[idx].locale {
 			var _this = getPrivatizedInstance();
-			var done = false;
 			var elist = _this.getEList(key, false, tok);
-			if (elist == nil) then done = true;
-			if (!done) {
+			if (elist != nil) {
 				for i in 1..elist.count {
 					if (elist.keys[i] == key) {
 						res = true;
@@ -439,8 +437,8 @@ class DistributedMapImpl {
 						break;
 					}
 				}
+				elist.lock.write(E_AVAIL);
 			}
-			elist.lock.write(E_AVAIL);
 		}
 		tok.unpin();
 		return (res, resVal);
@@ -452,11 +450,9 @@ class DistributedMapImpl {
 		var res = false;
 		on this.rootBuckets[idx].locale {
 			var _this = getPrivatizedInstance();
-			var done = false;
 			// var (elist, pList, idx) = getPEList(key, false, tok);
 			var elist = _this.getEList(key, false, tok);
-			if (elist == nil) then done = true;
-			if (!done) {
+			if (elist != nil) {
 				for i in 1..elist.count {
 					if (elist.keys[i] == key) {
 						// count.sub(1);
@@ -467,8 +463,8 @@ class DistributedMapImpl {
 						break;
 					}
 				}
+				elist.lock.write(E_AVAIL);
 			}
-			elist.lock.write(E_AVAIL);
 
 			// if elist.count == 0 {
 			// 	pList.buckets[idx].write(nil);
@@ -493,26 +489,46 @@ class DistributedMapImpl {
 	}
 }
 
-proc testEList() {
+config const N = 1024;
+use Time;
+
+proc randomOpsBenchmark (maxLimit : uint = max(uint(16))) {
+	var timer = new Timer();
 	var map = new DistributedMap(int, int);
+	// var tok = map.getToken();
+	// tok.pin();
+	// map.insert(1..(maxLimit:int), 0, tok);
+	// tok.unpin();
+	timer.start();
 	coforall loc in Locales do on loc {
-		var seedRNG = new owned RandomStream(int, parSafe=true);
 		coforall tid in 1..here.maxTaskPar {
 			var tok = map.getToken();
-			for i in 1..10 {
-				var key = seedRNG.getNext();
-				map.insert(key, key, tok);
-				assert(map.find(key, tok) == (true, key));
-				map.erase(key, tok);
-				assert(map.find(key, tok)[1] == false);
+			tok.pin();
+			var rng = new RandomStream(real);
+			var keyRng = new RandomStream(int);
+			for i in 1..N {
+				var s = rng.getNext();
+				var key = keyRng.getNext(0, maxLimit:int);
+				if s < 0.33 {
+					map.insert(key,i,tok);
+				} else if s < 0.66 {
+					map.erase(key, tok);
+				} else {
+					map.find(key, tok);
+				}
 			}
-			// writeln(loc, "~", tid);
+			tok.unpin();
 		}
 	}
+	timer.stop();
+	writeln("Time taken: ", timer.elapsed());
+	var ops = Locales.size * here.maxTaskPar * N;
+	var opspersec = ops/timer.elapsed();
+	writeln("Completed ", ops, " operations in ", timer.elapsed(), "s with ", opspersec, " operations/sec");
 }
 
 proc main() {
-	testEList();
+	randomOpsBenchmark(max(uint(16)));
 	// var map = new DistributedMap(int, int);
 	// var tok = map.manager.register();
 	// writeln(map);
