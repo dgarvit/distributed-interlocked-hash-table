@@ -16,7 +16,7 @@ config param DEPTH = 2;
 config param EMAX = 4;
 
 // Note: Once this becomes distributed, we have to make it per-locale
-var seedRNG = new owned RandomStream(uint(64), parSafe=true);
+// var seedRNG = new owned RandomStream(uint(64), parSafe=true);
 
 const E_AVAIL = 1;
 const E_LOCK = 2;
@@ -142,11 +142,11 @@ class Bucket : Base {
 		this.lock.write(E_AVAIL);
 	}
 
-	proc init(parent : unmanaged Buckets(?keyType, ?valType) = nil) {
-		super.init(keyType, valType);
-		this.lock.write(E_AVAIL);
-		this.parent = parent;
-	}
+	// proc init(parent : unmanaged Buckets(?keyType, ?valType) = nil) {
+	// 	super.init(keyType, valType);
+	// 	this.lock.write(E_AVAIL);
+	// 	this.parent = parent;
+	// }
 
 	proc releaseLock() {
 		if (lock.read() == E_LOCK) then lock.write(E_AVAIL);
@@ -160,21 +160,12 @@ class Buckets : Base {
 	var buckets : [bucketsDom] AtomicObject(unmanaged Base(keyType?, valType?)?, hasABASupport=false, hasGlobalSupport=true);
 	// var buckets : [0..(size-1)] AtomicObject(unmanaged Base(keyType?, valType?)?, hasABASupport=false, hasGlobalSupport=true);
 
-	proc init(type keyType, type valType, targetLocales = [here]) {
+	proc init(type keyType, type valType, seed = 0) {
 		super.init(keyType, valType);
 		this.lock.write(P_INNER);
-		this.seed = seedRNG.getNext();
+		this.seed = seed;
 		this.size = DEFAULT_NUM_BUCKETS;
 		this.bucketsDom = {0..#DEFAULT_NUM_BUCKETS};
-	}
-
-	proc init(parent : unmanaged Buckets(?keyType, ?valType), targetLocales = [here]) {
-		super.init(keyType, valType);
-		this.seed = seedRNG.getNext();
-		this.lock.write(P_INNER);
-		this.parent = parent;
-		this.size = round(parent.buckets.size * MULTIPLIER_NUM_BUCKETS):int;
-		this.bucketsDom = {0..#round(parent.buckets.size * MULTIPLIER_NUM_BUCKETS):int};
 	}
 
 	// _gen_key will generate the hash on the combined seed and hash of original key
@@ -232,17 +223,18 @@ class DistributedMapImpl {
 	var rootArray : unmanaged RootBucketsArray(keyType, valType);
 	var rootBuckets = _newArray(rootArray.A._value);
 	var manager : EpochManager;
+	var seedRNG = new owned RandomStream(uint(64), parSafe=true);
 
 	proc init(type keyType, type valType) {
 		this.keyType = keyType;
 		this.valType = valType;
-		this.rootSeed = seedRNG.getNext();
 		this.rootArray = new unmanaged RootBucketsArray(keyType, valType);
 		this.manager = new EpochManager(); // This will be shared across all instances...
 		// TODO: We need to add a `UninitializedEpochManager` helper function that will not initialize the `record`
 		// since records are initialzied by default in Chapel, regardless of what you want, with no way to avoid this.
 
 		this.complete();
+		this.rootSeed = seedRNG.getNext();
 		this.pid = _newPrivatizedClass(this);
 	}
 
@@ -252,6 +244,240 @@ class DistributedMapImpl {
 		this.pid = privatizedData[1];
 		this.rootArray = privatizedData[3];
 		this.manager = privatizedData[2];
+	}
+
+	proc getToken() : owned DistTokenWrapper {
+		return manager.register();
+	}
+
+	proc rootHash(key : keyType) {
+		return _gen_key(chpl__defaultHashCombine(chpl__defaultHash(key), this.rootSeed, 1));
+	}
+
+	proc getEList(key : keyType, isInsertion : bool, tok : owned DistTokenWrapper? = nil) {
+		var curr : unmanaged Buckets(keyType, valType)? = nil;
+		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
+		var next = rootBuckets[idx].read();
+		var shouldYield = false;
+		while (true) {
+			// var idx = (curr.hash(key) % (curr.buckets.size):uint):int;
+			// var next = curr.buckets[idx].read();
+			// writeln("stuck");
+			if (next == nil) {
+				// If we're not inserting something, I.E we are removing
+				// or retreiving, we are done.
+				if !isInsertion then return nil;
+
+				// Otherwise, speculatively create a new bucket to add in.
+				var newList = new unmanaged Bucket(this.keyType, this.valType);
+				newList.lock.write(E_LOCK);
+
+				// We set our Bucket, we also own it so return it
+				if (this.rootBuckets[idx].compareAndSwap(nil, newList)) {
+					return newList;
+				} else {
+					// Someone else set their bucket, reload.
+					delete newList;
+				}
+			}
+			else if (next.lock.read() == P_INNER) {
+				curr = next : unmanaged Buckets(keyType, valType);
+				break;
+			}
+			else if (next.lock.read() == E_AVAIL) {
+				// We now own the bucket...
+				if (next.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+					// Non-insertions don't care.
+					if !isInsertion then return next : unmanaged Bucket(keyType, valType);
+					// Insertions cannot have a full bucket...
+					// If it is not full return it
+					var bucket = next : unmanaged Bucket(keyType, valType)?;
+					if bucket.count < BUCKET_NUM_ELEMS then
+						return bucket;
+
+					for k in bucket.keys {
+						if k == key {
+							return bucket;
+						}
+					}
+
+					// Rehash into new Buckets
+					var newBuckets = new unmanaged Buckets(keyType, valType, seedRNG.getNext());
+					for (k,v) in zip(bucket.keys, bucket.values) {
+						var idx = (newBuckets.hash(k) % newBuckets.size:uint):int;
+						if newBuckets.buckets[idx].read() == nil {
+							newBuckets.buckets[idx].write(new unmanaged Bucket(keyType, valType));
+						}
+						var buck = newBuckets.buckets[idx].read() : unmanaged Bucket(keyType, valType)?;
+						buck.count += 1;
+						buck.keys[buck.count] = k;
+						buck.values[buck.count] = v;
+					}
+
+					next.lock.write(GARBAGE);
+					tok.deferDelete(next);
+					rootBuckets[idx].write(newBuckets: unmanaged Base(keyType, valType));
+					curr = newBuckets;
+					break;
+				}
+			}
+
+			if shouldYield then chpl_task_yield(); // If lock could not be acquired
+			shouldYield = true;
+		}
+		shouldYield = true;
+
+		while (true) {
+			var idx = (curr.hash(key) % (curr.buckets.size):uint):int;
+			var next = curr.buckets[idx].read();
+			if (next == nil) {
+				// If we're not inserting something, I.E we are removing
+				// or retreiving, we are done.
+				if !isInsertion then return nil;
+
+				// Otherwise, speculatively create a new bucket to add in.
+				var newList = new unmanaged Bucket(keyType, valType);
+				newList.lock.write(E_LOCK);
+
+				// We set our Bucket, we also own it so return it
+				if (curr.buckets[idx].compareAndSwap(nil, newList)) {
+					return newList;
+				} else {
+					// Someone else set their bucket, reload.
+					delete newList;
+				}
+			}
+			else if (next.lock.read() == P_INNER) {
+				curr = next : unmanaged Buckets(keyType, valType);
+			}
+			else if (next.lock.read() == E_AVAIL) {
+				// We now own the bucket...
+				if (next.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+					// Non-insertions don't care.
+					if !isInsertion then return next : unmanaged Bucket(keyType, valType);
+					// Insertions cannot have a full bucket...
+					// If it is not full return it
+					var bucket = next : unmanaged Bucket(keyType, valType)?;
+					if bucket.count < BUCKET_NUM_ELEMS then
+						return bucket;
+
+					for k in bucket.keys {
+						if k == key {
+							return bucket;
+						}
+					}
+
+					// Rehash into new Buckets
+					var newBuckets = new unmanaged Buckets(keyType, valType, seedRNG.getNext());
+					for (k,v) in zip(bucket.keys, bucket.values) {
+						var idx = (newBuckets.hash(k) % newBuckets.size:uint):int;
+						if newBuckets.buckets[idx].read() == nil {
+							newBuckets.buckets[idx].write(new unmanaged Bucket(keyType, valType));
+						}
+						var buck = newBuckets.buckets[idx].read() : unmanaged Bucket(keyType, valType)?;
+						buck.count += 1;
+						buck.keys[buck.count] = k;
+						buck.values[buck.count] = v;
+					}
+
+					next.lock.write(GARBAGE);
+					tok.deferDelete(next); // tok could be from another locale... Overhead?
+					curr.buckets[idx].write(newBuckets: unmanaged Base(keyType, valType));
+					curr = newBuckets;
+				}
+			}
+
+			if shouldYield then chpl_task_yield(); // If lock could not be acquired
+			shouldYield = true;
+		}
+		return nil;
+	}
+
+	proc insert(key : keyType, val : valType, tok : owned DistTokenWrapper = getToken()) : bool {
+		tok.pin();
+		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
+		var res = false;
+		on this.rootBuckets[idx].locale {
+			var done = false;
+			var _this = getPrivatizedInstance();
+			var elist = _this.getEList(key, true, tok);
+			for i in 1..elist.count {
+				if (elist.keys[i] == key) {
+					elist.lock.write(E_AVAIL);
+					tok.unpin();
+					done = true;
+					break;
+				}
+			}
+			if (!done) {
+				// count.add(1);
+				elist.count += 1;
+				elist.keys[elist.count] = key;
+				elist.values[elist.count] = val;
+				elist.lock.write(E_AVAIL);
+				res = true;
+				tok.unpin();
+			}
+		}
+		return res;
+	}
+
+	proc find(key : keyType, tok : owned DistTokenWrapper = getToken()) : (bool, valType) {
+		tok.pin();
+		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
+		var res = false;
+		var resVal : valType?;
+		on this.rootBuckets[idx].locale {
+			var _this = getPrivatizedInstance();
+			var done = false;
+			var elist = _this.getEList(key, false);
+			if (elist == nil) then done = true;
+			if (!done) {
+				for i in 1..elist.count {
+					if (elist.keys[i] == key) {
+						res = true;
+						resVal = elist.values[i];
+						break;
+					}
+				}
+				elist.lock.write(E_AVAIL);
+			}
+		}
+		tok.unpin();
+		return (res, resVal);
+	}
+
+	proc erase(key : keyType, tok : owned DistTokenWrapper = getToken()) : bool {
+		tok.pin();
+		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
+		var res = false;
+		on this.rootBuckets[idx].locale {
+			var _this = getPrivatizedInstance();
+			var done = false;
+			// var (elist, pList, idx) = getPEList(key, false, tok);
+			var elist = _this.getEList(key, false);
+			if (elist == nil) then done = true;
+			if (!done) {
+				for i in 1..elist.count {
+					if (elist.keys[i] == key) {
+						// count.sub(1);
+						elist.keys[i] = elist.keys[elist.count];
+						elist.values[i] = elist.values[elist.count];
+						elist.count -= 1;
+						res = true;
+						break;
+					}
+				}
+			}
+
+			// if elist.count == 0 {
+			// 	pList.buckets[idx].write(nil);
+			// 	elist.lock.write(GARBAGE);
+			// 	tok.deferDelete(elist);
+			// } else elist.lock.write(E_AVAIL);
+		}
+		tok.unpin();
+		return res;
 	}
 
 	proc dsiPrivatize(privatizedData) {
@@ -267,15 +493,30 @@ class DistributedMapImpl {
 	}
 }
 
-proc main() {
+proc testEList() {
 	var map = new DistributedMap(int, int);
-	var tok = map.manager.register();
-	writeln(map);
-	// Test that on Locales other than 0, that they see the same distributed array
-	forall bucket in map.rootBuckets {
-		bucket.write(new unmanaged Bucket(int, int));
-	}
 	coforall loc in Locales do on loc {
-		assert(&& reduce (map.rootBuckets.read() != nil), here, " has a nil bucket!");
+		var seedRNG = new owned RandomStream(int, parSafe=true);
+		coforall tid in 1..here.maxTaskPar {
+			var tok = map.getToken();
+			for i in 1..10 {
+				var key = seedRNG.getNext();
+				writeln(map.insert(key, 1, tok):string + " " + writeln(map.find(key, tok)):string + " " + writeln(map.erase(key, tok)):string);
+			}
+		}
 	}
+}
+
+proc main() {
+	testEList();
+	// var map = new DistributedMap(int, int);
+	// var tok = map.manager.register();
+	// writeln(map);
+	// // Test that on Locales other than 0, that they see the same distributed array
+	// forall bucket in map.rootBuckets {
+	// 	bucket.write(new unmanaged Bucket(int, int));
+	// }
+	// coforall loc in Locales do on loc {
+	// 	assert(&& reduce (map.rootBuckets.read() != nil), here, " has a nil bucket!");
+	// }
 }
