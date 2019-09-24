@@ -254,7 +254,7 @@ class DistributedMapImpl {
 		return _gen_key(chpl__defaultHashCombine(chpl__defaultHash(key), this.rootSeed, 1));
 	}
 
-	proc getEList(key : keyType, isInsertion : bool, tok : owned DistTokenWrapper) {
+	proc getEList(key : keyType, isInsertion : bool, tok) {
 		var curr : unmanaged Buckets(keyType, valType)? = nil;
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
 		var next = rootBuckets[idx].read();
@@ -262,7 +262,6 @@ class DistributedMapImpl {
 		while (true) {
 			// var idx = (curr.hash(key) % (curr.buckets.size):uint):int;
 			// var next = curr.buckets[idx].read();
-			// writeln("stuck");
 			if (next == nil) {
 				// If we're not inserting something, I.E we are removing
 				// or retreiving, we are done.
@@ -440,8 +439,8 @@ class DistributedMapImpl {
 						break;
 					}
 				}
-				elist.lock.write(E_AVAIL);
 			}
+			elist.lock.write(E_AVAIL);
 		}
 		tok.unpin();
 		return (res, resVal);
@@ -469,6 +468,7 @@ class DistributedMapImpl {
 					}
 				}
 			}
+			elist.lock.write(E_AVAIL);
 
 			// if elist.count == 0 {
 			// 	pList.buckets[idx].write(nil);
@@ -501,11 +501,12 @@ proc testEList() {
 			var tok = map.getToken();
 			for i in 1..10 {
 				var key = seedRNG.getNext();
-				map.insert(key, 1, tok);
-				writeln(map.find(key, tok)); 
+				map.insert(key, key, tok);
+				assert(map.find(key, tok) == (true, key));
 				map.erase(key, tok);
+				assert(map.find(key, tok)[1] == false);
 			}
-			writeln(loc, "~", tid);
+			// writeln(loc, "~", tid);
 		}
 	}
 }
