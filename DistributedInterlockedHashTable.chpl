@@ -257,9 +257,9 @@ class DistributedMapImpl {
 	proc getEList(key : keyType, isInsertion : bool, tok) {
 		var curr : unmanaged Buckets(keyType, valType)? = nil;
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
-		var next = rootBuckets[idx].read();
 		var shouldYield = false;
 		while (true) {
+			var next = rootBuckets[idx].read();
 			// var idx = (curr.hash(key) % (curr.buckets.size):uint):int;
 			// var next = curr.buckets[idx].read();
 			if (next == nil) {
@@ -321,10 +321,12 @@ class DistributedMapImpl {
 				}
 			}
 
+			// if next != nil then writeln(next.lock.read());
+
 			if shouldYield then chpl_task_yield(); // If lock could not be acquired
 			shouldYield = true;
 		}
-		shouldYield = true;
+		shouldYield = false;
 
 		while (true) {
 			var idx = (curr.hash(key) % (curr.buckets.size):uint):int;
