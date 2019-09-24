@@ -160,7 +160,7 @@ class Buckets : Base {
 	var buckets : [bucketsDom] AtomicObject(unmanaged Base(keyType?, valType?)?, hasABASupport=false, hasGlobalSupport=true);
 	// var buckets : [0..(size-1)] AtomicObject(unmanaged Base(keyType?, valType?)?, hasABASupport=false, hasGlobalSupport=true);
 
-	proc init(type keyType, type valType, seed = 0) {
+	proc init(type keyType, type valType, seed : uint(64) = 0) {
 		super.init(keyType, valType);
 		this.lock.write(P_INNER);
 		this.seed = seed;
@@ -254,7 +254,7 @@ class DistributedMapImpl {
 		return _gen_key(chpl__defaultHashCombine(chpl__defaultHash(key), this.rootSeed, 1));
 	}
 
-	proc getEList(key : keyType, isInsertion : bool, tok : owned DistTokenWrapper? = nil) {
+	proc getEList(key : keyType, isInsertion : bool, tok : owned DistTokenWrapper) {
 		var curr : unmanaged Buckets(keyType, valType)? = nil;
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
 		var next = rootBuckets[idx].read();
@@ -430,7 +430,7 @@ class DistributedMapImpl {
 		on this.rootBuckets[idx].locale {
 			var _this = getPrivatizedInstance();
 			var done = false;
-			var elist = _this.getEList(key, false);
+			var elist = _this.getEList(key, false, tok);
 			if (elist == nil) then done = true;
 			if (!done) {
 				for i in 1..elist.count {
@@ -455,7 +455,7 @@ class DistributedMapImpl {
 			var _this = getPrivatizedInstance();
 			var done = false;
 			// var (elist, pList, idx) = getPEList(key, false, tok);
-			var elist = _this.getEList(key, false);
+			var elist = _this.getEList(key, false, tok);
 			if (elist == nil) then done = true;
 			if (!done) {
 				for i in 1..elist.count {
@@ -501,8 +501,11 @@ proc testEList() {
 			var tok = map.getToken();
 			for i in 1..10 {
 				var key = seedRNG.getNext();
-				writeln(map.insert(key, 1, tok):string + " " + writeln(map.find(key, tok)):string + " " + writeln(map.erase(key, tok)):string);
+				map.insert(key, 1, tok);
+				writeln(map.find(key, tok)); 
+				map.erase(key, tok);
 			}
+			writeln(loc, "~", tid);
 		}
 	}
 }
