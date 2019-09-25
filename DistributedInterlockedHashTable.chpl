@@ -5,6 +5,7 @@ use EpochManager;
 use Random;
 use BlockDist;
 use VisualDebug;
+use CommDiagnostics;
 
 param BUCKET_UNLOCKED = 0;
 param BUCKET_LOCKED = 1;
@@ -394,11 +395,10 @@ class DistributedMapImpl {
 		return nil;
 	}
 
-	proc insert(key : keyType, val : valType, tok : owned DistTokenWrapper = getToken()) : bool {
+	proc insert(key : keyType, val : valType, tok : owned DistTokenWrapper = getToken()) {
 		tok.pin();
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
-		var res = false;
-		on this.rootBuckets[idx].locale {
+		on this.rootArray.D.dist.idxToLocale(idx) {
 			var done = false;
 			var _this = getPrivatizedInstance();
 			var elist = _this.getEList(key, true, tok);
@@ -416,11 +416,9 @@ class DistributedMapImpl {
 				elist.keys[elist.count] = key;
 				elist.values[elist.count] = val;
 				elist.lock.write(E_AVAIL);
-				res = true;
-				tok.unpin();
 			}
 		}
-		return res;
+		tok.unpin();
 	}
 
 	proc find(key : keyType, tok : owned DistTokenWrapper = getToken()) : (bool, valType) {
@@ -428,7 +426,7 @@ class DistributedMapImpl {
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
 		var res = false;
 		var resVal : valType?;
-		on this.rootBuckets[idx].locale {
+		on this.rootArray.D.dist.idxToLocale(idx) {
 			var _this = getPrivatizedInstance();
 			var elist = _this.getEList(key, false, tok);
 			if (elist != nil) {
@@ -446,11 +444,10 @@ class DistributedMapImpl {
 		return (res, resVal);
 	}
 
-	proc erase(key : keyType, tok : owned DistTokenWrapper = getToken()) : bool {
+	proc erase(key : keyType, tok : owned DistTokenWrapper = getToken()) {
 		tok.pin();
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
-		var res = false;
-		on this.rootBuckets[idx].locale {
+		on this.rootArray.D.dist.idxToLocale(idx) {
 			var _this = getPrivatizedInstance();
 			// var (elist, pList, idx) = getPEList(key, false, tok);
 			var elist = _this.getEList(key, false, tok);
@@ -461,7 +458,6 @@ class DistributedMapImpl {
 						elist.keys[i] = elist.keys[elist.count];
 						elist.values[i] = elist.values[elist.count];
 						elist.count -= 1;
-						res = true;
 						break;
 					}
 				}
@@ -475,7 +471,6 @@ class DistributedMapImpl {
 			// } else elist.lock.write(E_AVAIL);
 		}
 		tok.unpin();
-		return res;
 	}
 
 	proc dsiPrivatize(privatizedData) {
@@ -491,11 +486,12 @@ class DistributedMapImpl {
 	}
 }
 
-config const N = 1024;
+config const N = 1024 * 1024;
 use Time;
 
 proc randomOpsBenchmark (maxLimit : uint = max(uint(16))) {
 	var timer = new Timer();
+	// startVdebug("E1");
 	var map = new DistributedMap(int, int);
 	// var tok = map.getToken();
 	// tok.pin();
@@ -523,14 +519,68 @@ proc randomOpsBenchmark (maxLimit : uint = max(uint(16))) {
 		}
 	}
 	timer.stop();
+	// stopVdebug();
 	writeln("Time taken: ", timer.elapsed());
 	var ops = Locales.size * here.maxTaskPar * N;
 	var opspersec = ops/timer.elapsed();
 	writeln("Completed ", ops, " operations in ", timer.elapsed(), "s with ", opspersec, " operations/sec");
 }
 
+proc randomOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
+	var timer = new Timer();
+	var map = new DistributedMap(int, int);
+	// var tok = map.getToken();
+	// tok.pin();
+	// map.insert(1..(maxLimit:int), 0, tok);
+	// tok.unpin();
+	timer.start();
+	coforall loc in Locales do on loc {
+		const opsperloc = N / Locales.size;
+		// var timer1 = new Timer();
+		// timer1.start();
+		coforall tid in 1..here.maxTaskPar {
+			var tok = map.getToken();
+			tok.pin();
+			var rng = new RandomStream(real);
+			var keyRng = new RandomStream(int);
+			const opspertask = opsperloc / here.maxTaskPar;
+			for i in 1..opspertask {
+				var s = rng.getNext();
+				var key = keyRng.getNext(0, maxLimit:int);
+				if s < 0.33 {
+					map.insert(key,i,tok);
+				} else if s < 0.66 {
+					map.erase(key, tok);
+				} else {
+					map.find(key, tok);
+				}
+			}
+			tok.unpin();
+		}
+		// timer1.stop();
+		// writeln(loc, " took ", timer1.elapsed(), "s.");
+	}
+	timer.stop();
+	writeln("Time taken: ", timer.elapsed());
+	var opspersec = N/timer.elapsed();
+	writeln("Completed ", N, " operations in ", timer.elapsed(), "s with ", opspersec, " operations/sec");
+}
+
+proc diagnosticstest() {
+	var map = new DistributedMap(int, int);
+	var tok = map.getToken();
+	startVerboseComm();
+	map.insert(1, 1, tok);
+	writeln();
+	map.find(1, tok);
+	writeln();
+	map.erase(1, tok);
+	stopVerboseComm();
+}
+
 proc main() {
-	randomOpsBenchmark(max(uint(16)));
+	randomOpsStrongBenchmark(max(uint(16)));
+	// diagnosticstest();
 	// var map = new DistributedMap(int, int);
 	// var tok = map.manager.register();
 	// writeln(map);
