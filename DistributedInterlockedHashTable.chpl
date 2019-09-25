@@ -398,9 +398,10 @@ class DistributedMapImpl {
 	proc insert(key : keyType, val : valType, tok : owned DistTokenWrapper = getToken()) {
 		tok.pin();
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
+        var _pid = pid;
 		on this.rootArray.D.dist.idxToLocale(idx) {
 			var done = false;
-			var _this = getPrivatizedInstance();
+			var _this = chpl_getPrivatizedCopy(this.type, _pid);
 			var elist = _this.getEList(key, true, tok);
 			for i in 1..elist.count {
 				if (elist.keys[i] == key) {
@@ -426,8 +427,9 @@ class DistributedMapImpl {
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
 		var res = false;
 		var resVal : valType?;
-		on this.rootArray.D.dist.idxToLocale(idx) {
-			var _this = getPrivatizedInstance();
+		var _pid = pid;
+        on this.rootArray.D.dist.idxToLocale(idx) {
+			var _this = chpl_getPrivatizedCopy(this.type, _pid);
 			var elist = _this.getEList(key, false, tok);
 			if (elist != nil) {
 				for i in 1..elist.count {
@@ -447,8 +449,9 @@ class DistributedMapImpl {
 	proc erase(key : keyType, tok : owned DistTokenWrapper = getToken()) {
 		tok.pin();
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
-		on this.rootArray.D.dist.idxToLocale(idx) {
-			var _this = getPrivatizedInstance();
+		var _pid = pid;
+        on this.rootArray.D.dist.idxToLocale(idx) {
+			var _this = chpl_getPrivatizedCopy(this.type, _pid);
 			// var (elist, pList, idx) = getPEList(key, false, tok);
 			var elist = _this.getEList(key, false, tok);
 			if (elist != nil) {
@@ -569,7 +572,7 @@ proc randomOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 proc diagnosticstest() {
 	var map = new DistributedMap(int, int);
 	var tok = map.getToken();
-	startVerboseComm();
+    startVerboseComms();
 	map.insert(1, 1, tok);
 	writeln();
 	map.find(1, tok);
@@ -579,7 +582,9 @@ proc diagnosticstest() {
 }
 
 proc main() {
+    startVerboseComm();
 	randomOpsStrongBenchmark(max(uint(16)));
+    stopVerboseComm();
 	// diagnosticstest();
 	// var map = new DistributedMap(int, int);
 	// var tok = map.manager.register();
