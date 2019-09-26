@@ -186,10 +186,11 @@ class Buckets : Base {
 // array that we will be keeping a reference to. This makes use of the `pragma "no copy"`
 // compiler directive that disables the implicit deep-copy. This is very 'hacky', but it
 // has served me very well so far.
+config const ROOT_BUCKETS_SIZE = DEFAULT_NUM_BUCKETS * Locales.size;
 class RootBucketsArray {
 	type keyType;
 	type valType;
-	var D = {0..#DEFAULT_NUM_BUCKETS} dmapped Block(boundingBox={0..#DEFAULT_NUM_BUCKETS}, targetLocales=Locales);
+	var D = {0..#ROOT_BUCKETS_SIZE} dmapped Block(boundingBox={0..#ROOT_BUCKETS_SIZE}, targetLocales=Locales);
 	var A : [D] AtomicObject(unmanaged Base(keyType?, valType?)?, hasABASupport=false, hasGlobalSupport=true);
 }
 
@@ -399,14 +400,14 @@ class DistributedMapImpl {
 		tok.pin();
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
         var _pid = pid;
-		on this.rootArray.D.dist.idxToLocale(idx) {
+		on Locales[idx/DEFAULT_NUM_BUCKETS] {
+			const (_key,_val) = (key, val);
 			var done = false;
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
 			var elist = _this.getEList(key, true, tok);
 			for i in 1..elist.count {
-				if (elist.keys[i] == key) {
+				if (elist.keys[i] == _key) {
 					elist.lock.write(E_AVAIL);
-					tok.unpin();
 					done = true;
 					break;
 				}
@@ -414,8 +415,8 @@ class DistributedMapImpl {
 			if (!done) {
 				// count.add(1);
 				elist.count += 1;
-				elist.keys[elist.count] = key;
-				elist.values[elist.count] = val;
+				elist.keys[elist.count] = _key;
+				elist.values[elist.count] = _val;
 				elist.lock.write(E_AVAIL);
 			}
 		}
@@ -428,12 +429,13 @@ class DistributedMapImpl {
 		var res = false;
 		var resVal : valType?;
 		var _pid = pid;
-        on this.rootArray.D.dist.idxToLocale(idx) {
+        on Locales[idx/DEFAULT_NUM_BUCKETS] {
+			const _key = key;
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
 			var elist = _this.getEList(key, false, tok);
 			if (elist != nil) {
 				for i in 1..elist.count {
-					if (elist.keys[i] == key) {
+					if (elist.keys[i] == _key) {
 						res = true;
 						resVal = elist.values[i];
 						break;
@@ -450,13 +452,14 @@ class DistributedMapImpl {
 		tok.pin();
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
 		var _pid = pid;
-        on this.rootArray.D.dist.idxToLocale(idx) {
+        on Locales[idx/DEFAULT_NUM_BUCKETS] {
+			const _key = key;
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
 			// var (elist, pList, idx) = getPEList(key, false, tok);
 			var elist = _this.getEList(key, false, tok);
 			if (elist != nil) {
 				for i in 1..elist.count {
-					if (elist.keys[i] == key) {
+					if (elist.keys[i] == _key) {
 						// count.sub(1);
 						elist.keys[i] = elist.keys[elist.count];
 						elist.values[i] = elist.values[elist.count];
