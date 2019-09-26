@@ -315,7 +315,7 @@ class DistributedMapImpl {
 					}
 
 					next.lock.write(GARBAGE);
-					tok.deferDelete(next);
+					// tok.deferDelete(next);
 					rootBuckets[idx].write(newBuckets: unmanaged Base(keyType, valType));
 					curr = newBuckets;
 					break;
@@ -401,23 +401,25 @@ class DistributedMapImpl {
         var _pid = pid;
 		on rootBuckets[idx].locale {
 			const (_key,_val) = (key, val);
-			var done = false;
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
-			var elist = _this.getEList(key, true, tok);
-			for i in 1..elist.count {
-				if (elist.keys[i] == _key) {
-					elist.lock.write(E_AVAIL);
-					done = true;
-					break;
-				}
-			}
-			if (!done) {
-				// count.add(1);
-				elist.count += 1;
-				elist.keys[elist.count] = _key;
-				elist.values[elist.count] = _val;
-				elist.lock.write(E_AVAIL);
-			}
+			local {
+			  var done = false;
+              var elist = _this.getEList(key, true, tok);
+              for i in 1..elist.count {
+                if (elist.keys[i] == _key) {
+                  elist.lock.write(E_AVAIL);
+                  done = true;
+                  break;
+                }
+              }
+              if (!done) {
+                // count.add(1);
+                elist.count += 1;
+                elist.keys[elist.count] = _key;
+                elist.values[elist.count] = _val;
+                elist.lock.write(E_AVAIL);
+              }
+            }
 		}
 		tok.unpin();
 	}
@@ -430,17 +432,21 @@ class DistributedMapImpl {
 		var _pid = pid;
         on rootBuckets[idx].locale {
 			const _key = key;
-			var _this = chpl_getPrivatizedCopy(this.type, _pid);
-			var elist = _this.getEList(key, false, tok);
-			if (elist != nil) {
-				for i in 1..elist.count {
-					if (elist.keys[i] == _key) {
-						(res, resVal) = (true, elist.values[i]);
-						break;
-					}
-				}
-				elist.lock.write(E_AVAIL);
-			}
+            var (tmpres, tmpresVal) : (bool, valType);
+            var _this = chpl_getPrivatizedCopy(this.type, _pid);
+			local {
+              var elist = _this.getEList(key, false, tok);
+              if (elist != nil) {
+                for i in 1..elist.count {
+                  if (elist.keys[i] == _key) {
+                    (tmpres, tmpresVal) = (true, elist.values[i]);
+                    break;
+                  }
+                }
+                elist.lock.write(E_AVAIL);
+              }
+            }
+            (res, resVal) = (tmpres, tmpresVal);
 		}
 		tok.unpin();
 		return (res, resVal);
@@ -454,19 +460,21 @@ class DistributedMapImpl {
 			const _key = key;
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
 			// var (elist, pList, idx) = getPEList(key, false, tok);
-			var elist = _this.getEList(key, false, tok);
-			if (elist != nil) {
-				for i in 1..elist.count {
-					if (elist.keys[i] == _key) {
-						// count.sub(1);
-						elist.keys[i] = elist.keys[elist.count];
-						elist.values[i] = elist.values[elist.count];
-						elist.count -= 1;
-						break;
-					}
-				}
-				elist.lock.write(E_AVAIL);
-			}
+			local {
+              var elist = _this.getEList(_key, false, tok);
+              if (elist != nil) {
+                for i in 1..elist.count {
+                  if (elist.keys[i] == _key) {
+                    // count.sub(1);
+                    elist.keys[i] = elist.keys[elist.count];
+                    elist.values[i] = elist.values[elist.count];
+                    elist.count -= 1;
+                    break;
+                  }
+                }
+                elist.lock.write(E_AVAIL);
+              }
+            }
 
 			// if elist.count == 0 {
 			// 	pList.buckets[idx].write(nil);
