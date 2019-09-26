@@ -244,6 +244,7 @@ class DistributedMapImpl {
 		this.keyType = other.keyType;
 		this.valType = other.valType;
 		this.pid = privatizedData[1];
+		this.rootSeed = privatizedData[4];
 		this.rootArray = privatizedData[3];
 		this.manager = privatizedData[2];
 	}
@@ -262,8 +263,6 @@ class DistributedMapImpl {
 		var shouldYield = false;
 		while (true) {
 			var next = rootBuckets[idx].read();
-			// var idx = (curr.hash(key) % (curr.buckets.size):uint):int;
-			// var next = curr.buckets[idx].read();
 			if (next == nil) {
 				// If we're not inserting something, I.E we are removing
 				// or retreiving, we are done.
@@ -400,7 +399,7 @@ class DistributedMapImpl {
 		tok.pin();
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
         var _pid = pid;
-		on Locales[idx/DEFAULT_NUM_BUCKETS] {
+		on rootBuckets[idx].locale {
 			const (_key,_val) = (key, val);
 			var done = false;
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
@@ -429,15 +428,14 @@ class DistributedMapImpl {
 		var res = false;
 		var resVal : valType?;
 		var _pid = pid;
-        on Locales[idx/DEFAULT_NUM_BUCKETS] {
+        on rootBuckets[idx].locale {
 			const _key = key;
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
 			var elist = _this.getEList(key, false, tok);
 			if (elist != nil) {
 				for i in 1..elist.count {
 					if (elist.keys[i] == _key) {
-						res = true;
-						resVal = elist.values[i];
+						(res, resVal) = (true, elist.values[i]);
 						break;
 					}
 				}
@@ -452,7 +450,7 @@ class DistributedMapImpl {
 		tok.pin();
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
 		var _pid = pid;
-        on Locales[idx/DEFAULT_NUM_BUCKETS] {
+        on rootBuckets[idx].locale {
 			const _key = key;
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
 			// var (elist, pList, idx) = getPEList(key, false, tok);
@@ -484,7 +482,7 @@ class DistributedMapImpl {
 	}
 
 	proc dsiGetPrivatizeData() {
-		return (pid, manager, rootArray);
+		return (pid, manager, rootArray, rootSeed);
 	}
 
 	inline proc getPrivatizedInstance() {
@@ -542,8 +540,8 @@ proc randomOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 	timer.start();
 	coforall loc in Locales do on loc {
 		const opsperloc = N / Locales.size;
-		// var timer1 = new Timer();
-		// timer1.start();
+		var timer1 = new Timer();
+		timer1.start();
 		coforall tid in 1..here.maxTaskPar {
 			var tok = map.getToken();
 			tok.pin();
@@ -563,8 +561,8 @@ proc randomOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 			}
 			tok.unpin();
 		}
-		// timer1.stop();
-		// writeln(loc, " took ", timer1.elapsed(), "s.");
+		timer1.stop();
+		writeln(opsperloc / timer1.elapsed());
 	}
 	timer.stop();
 	writeln("Time taken: ", timer.elapsed());
@@ -584,10 +582,32 @@ proc diagnosticstest() {
 	stopVerboseComm();
 }
 
+config const VERBOSE = false;
+
 proc main() {
-    startVerboseComm();
+	if (VERBOSE) then startVerboseComm();
 	randomOpsStrongBenchmark(max(uint(16)));
-    stopVerboseComm();
+    if (VERBOSE) then stopVerboseComm();
+	// var map = new DistributedMap(int, int);
+	// var a : [0..#ROOT_BUCKETS_SIZE] int;
+	// var b : [0..#ROOT_BUCKETS_SIZE] int;
+	// map.insert(1..1024, 0);
+	// for i in 0..#map.rootBuckets.size {
+	// 	a[i] = map.rootBuckets[i].locale.id;
+	// 	b[i] = map.rootBuckets[i].read().locale.id;
+	// 	if (a[i] != b[i]) {
+	// 		var s = if map.rootBuckets[i].read() == nil then "nil" else "not nill";
+	// 		writeln("Index on ", a[i], " read on ", b[i], " while bucket is ", s);
+	// 	}
+	// }
+	// coforall loc in Locales do on loc {
+	// 	for i in 0..#map.rootBuckets.size {
+	// 		var x = map.rootBuckets[i].locale.id;
+	// 		var y = map.rootBuckets[i].read().locale.id;
+	// 		assert(a[i] == x);
+	// 		assert(b[i] == y);
+	// 	}
+	// }
 	// diagnosticstest();
 	// var map = new DistributedMap(int, int);
 	// var tok = map.manager.register();
