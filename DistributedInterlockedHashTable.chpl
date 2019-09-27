@@ -6,6 +6,7 @@ use Random;
 use BlockDist;
 use VisualDebug;
 use CommDiagnostics;
+use AggregationBuffer;
 
 param BUCKET_UNLOCKED = 0;
 param BUCKET_LOCKED = 1;
@@ -106,6 +107,12 @@ class Stack {
 	}
 }
 
+enum MapAction {
+	insert,
+	find,
+	erase
+}
+
 // Can be either a singular 'Bucket' or a plural 'Buckets'
 class Base {
 	type keyType;
@@ -194,6 +201,28 @@ class RootBucketsArray {
 	var A : [D] AtomicObject(unmanaged Base(keyType?, valType?)?, hasABASupport=false, hasGlobalSupport=true);
 }
 
+class MapFuture {
+	type valType;
+	var complete = false;
+	var found = false;
+	var val : valType?;
+
+	proc init (type valType) {
+		this.valType = valType;
+	}
+
+	proc success (val : valType) {
+		found = true;
+		this.val = val;
+		complete = true;
+	}
+
+	proc fail () {
+		found = false;
+		complete = true;
+	}
+}
+
 pragma "always RVF"
 record DistributedMap {
 	type keyType;
@@ -224,6 +253,7 @@ class DistributedMapImpl {
 	var rootSeed : uint(64); // Same across all nodes...
 	var rootArray : unmanaged RootBucketsArray(keyType, valType);
 	var rootBuckets = _newArray(rootArray.A._value);
+	var aggregator = UninitializedAggregator((MapAction, keyType, valType));
 	var manager : EpochManager;
 	var seedRNG = new owned RandomStream(uint(64), parSafe=true);
 
@@ -231,6 +261,7 @@ class DistributedMapImpl {
 		this.keyType = keyType;
 		this.valType = valType;
 		this.rootArray = new unmanaged RootBucketsArray(keyType, valType);
+		this.aggregator = new Aggregator((MapAction, keyType, valType?, MapFuture(valType)?), 64 * 1024);
 		this.manager = new EpochManager(); // This will be shared across all instances...
 		// TODO: We need to add a `UninitializedEpochManager` helper function that will not initialize the `record`
 		// since records are initialzied by default in Chapel, regardless of what you want, with no way to avoid this.
@@ -246,6 +277,7 @@ class DistributedMapImpl {
 		this.pid = privatizedData[1];
 		this.rootSeed = privatizedData[4];
 		this.rootArray = privatizedData[3];
+		this.aggregator = privatizedData[5];
 		this.manager = privatizedData[2];
 	}
 
@@ -398,7 +430,7 @@ class DistributedMapImpl {
 	proc insert(key : keyType, val : valType, tok : owned DistTokenWrapper = getToken()) {
 		tok.pin();
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
-        var _pid = pid;
+    var _pid = pid;
 		on rootBuckets[idx].locale {
 			const (_key,_val) = (key, val);
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
@@ -424,13 +456,108 @@ class DistributedMapImpl {
 		tok.unpin();
 	}
 
+	proc insertAsync(key : keyType, val : valType) {
+		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
+		var future : MapFuture(valType)?;
+		var buff = aggregator.aggregate((MapAction.insert, key, val, future), rootBuckets[idx].locale);
+		if buff != nil {
+			begin emptyBuffer(buff, rootBuckets[idx].locale);
+		}
+	}
+
+	proc findAsync(key : keyType) : MapFuture(valType) {
+		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
+		var val : this.valType?;
+		var future = new MapFuture(valType);
+		var buff = aggregator.aggregate((MapAction.find, key, val, future), rootBuckets[idx].locale);
+		if buff != nil {
+			begin emptyBuffer(buff, rootBuckets[idx].locale);
+		}
+		return future;
+	}
+
+	proc eraseAsync(key : keyType) {
+		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
+		var val : this.valType?;
+		var future : MapFuture(valType)?;
+		var buff = aggregator.aggregate((MapAction.erase, key, val, future), rootBuckets[idx].locale);
+		if buff != nil {
+			begin emptyBuffer(buff, rootBuckets[idx].locale);
+		}
+	}
+
+	// Should this be inline?
+	inline proc emptyBuffer(buffer : unmanaged Buffer, loc : locale) {
+		var _pid = pid;
+		on loc {
+			var buff = buffer.getArray();
+			buffer.done();
+			var _this = chpl_getPrivatizedCopy(this.type, _pid);
+			forall (action, key, val, future) in buff with (tok = _this.getToken()) {
+				tok.pin();
+				select action {
+					when MapAction.insert {
+						var elist = _this.getEList(key, true, tok);
+						for i in 1..elist.count {
+							if (elist.keys[i] == key) {
+								elist.lock.write(E_AVAIL);
+								done = true;
+								break;
+							}
+						}
+						if (!done) {
+							elist.count += 1;
+							elist.keys[elist.count] = key;
+							elist.values[elist.count] = val;
+							elist.lock.write(E_AVAIL);
+						}
+					}
+
+					when MapAction.find {
+						var elist = _this.getEList(key, false, tok);
+						var success = false;
+						var retVal = _this.valType?;
+						if (elist != nil) {
+							for i in 1..elist.count {
+								if (elist.keys[i] == key) {
+									retVal = elist.values[i];
+									success = true;
+									break;
+								}
+							}
+							elist.lock.write(E_AVAIL);
+							if success then future.success(retVal); // call this using `on`?
+							else future.fail();
+						}
+					}
+
+					when MapAction.erase {
+						var elist = _this.getEList(key, false, tok);
+						if (elist != nil) {
+							for i in 1..elist.count {
+								if (elist.keys[i] == _key) {
+									elist.keys[i] = elist.keys[elist.count];
+									elist.values[i] = elist.values[elist.count];
+									elist.count -= 1;
+									break;
+								}
+							}
+							elist.lock.write(E_AVAIL);
+						}
+					}
+				}
+				tok.unpin();
+			}
+		}
+	}
+
 	proc find(key : keyType, tok : owned DistTokenWrapper = getToken()) : (bool, valType) {
 		tok.pin();
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
 		var res = false;
 		var resVal : valType?;
 		var _pid = pid;
-        on rootBuckets[idx].locale {
+    on rootBuckets[idx].locale {
 			const _key = key;
             var (tmpres, tmpresVal) : (bool, valType);
             var _this = chpl_getPrivatizedCopy(this.type, _pid);
@@ -456,7 +583,7 @@ class DistributedMapImpl {
 		tok.pin();
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
 		var _pid = pid;
-        on rootBuckets[idx].locale {
+    on rootBuckets[idx].locale {
 			const _key = key;
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
 			// var (elist, pList, idx) = getPEList(key, false, tok);
@@ -490,7 +617,7 @@ class DistributedMapImpl {
 	}
 
 	proc dsiGetPrivatizeData() {
-		return (pid, manager, rootArray, rootSeed);
+		return (pid, manager, rootArray, rootSeed, aggregator);
 	}
 
 	inline proc getPrivatizedInstance() {
