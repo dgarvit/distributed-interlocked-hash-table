@@ -253,7 +253,7 @@ class DistributedMapImpl {
 	var rootSeed : uint(64); // Same across all nodes...
 	var rootArray : unmanaged RootBucketsArray(keyType, valType);
 	var rootBuckets = _newArray(rootArray.A._value);
-	var aggregator = UninitializedAggregator((MapAction, keyType, valType));
+	var aggregator = UninitializedAggregator((MapAction, keyType, valType?, MapFuture(valType)?));
 	var manager : EpochManager;
 	var seedRNG = new owned RandomStream(uint(64), parSafe=true);
 
@@ -430,7 +430,7 @@ class DistributedMapImpl {
 	proc insert(key : keyType, val : valType, tok : owned DistTokenWrapper = getToken()) {
 		tok.pin();
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
-    var _pid = pid;
+		var _pid = pid;
 		on rootBuckets[idx].locale {
 			const (_key,_val) = (key, val);
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
@@ -493,11 +493,12 @@ class DistributedMapImpl {
 			var buff = buffer.getArray();
 			buffer.done();
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
-			forall (action, key, val, future) in buff with (tok = _this.getToken()) {
+			forall (action, key, val, future) in buff with (var tok = _this.getToken()) {
 				tok.pin();
 				select action {
 					when MapAction.insert {
 						var elist = _this.getEList(key, true, tok);
+						var done = false;
 						for i in 1..elist.count {
 							if (elist.keys[i] == key) {
 								elist.lock.write(E_AVAIL);
@@ -535,7 +536,7 @@ class DistributedMapImpl {
 						var elist = _this.getEList(key, false, tok);
 						if (elist != nil) {
 							for i in 1..elist.count {
-								if (elist.keys[i] == _key) {
+								if (elist.keys[i] == key) {
 									elist.keys[i] = elist.keys[elist.count];
 									elist.values[i] = elist.values[elist.count];
 									elist.count -= 1;
@@ -551,13 +552,19 @@ class DistributedMapImpl {
 		}
 	}
 
+	proc flushBuffers() {
+		forall (buff, loc) in aggregator.flushGlobal() {
+			emptyBuffer(buff, loc);
+		}
+	}
+
 	proc find(key : keyType, tok : owned DistTokenWrapper = getToken()) : (bool, valType) {
 		tok.pin();
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
 		var res = false;
 		var resVal : valType?;
 		var _pid = pid;
-    on rootBuckets[idx].locale {
+		on rootBuckets[idx].locale {
 			const _key = key;
             var (tmpres, tmpresVal) : (bool, valType);
             var _this = chpl_getPrivatizedCopy(this.type, _pid);
@@ -583,7 +590,7 @@ class DistributedMapImpl {
 		tok.pin();
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
 		var _pid = pid;
-    on rootBuckets[idx].locale {
+		on rootBuckets[idx].locale {
 			const _key = key;
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
 			// var (elist, pList, idx) = getPEList(key, false, tok);
@@ -705,10 +712,47 @@ proc randomOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 	writeln("Completed ", N, " operations in ", timer.elapsed(), "s with ", opspersec, " operations/sec");
 }
 
+proc randomAsyncOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
+	var timer = new Timer();
+	var map = new DistributedMap(int, int);
+	// var tok = map.getToken();
+	// tok.pin();
+	// map.insert(1..(maxLimit:int), 0, tok);
+	// tok.unpin();
+	timer.start();
+	coforall loc in Locales do on loc {
+		const opsperloc = N / Locales.size;
+		// var timer1 = new Timer();
+		// timer1.start();
+		coforall tid in 1..here.maxTaskPar {
+			var rng = new RandomStream(real);
+			var keyRng = new RandomStream(int);
+			const opspertask = opsperloc / here.maxTaskPar;
+			for i in 1..opspertask {
+				var s = rng.getNext();
+				var key = keyRng.getNext(0, maxLimit:int);
+				if s < 0.33 {
+					map.insertAsync(key,i);
+				} else if s < 0.66 {
+					map.eraseAsync(key);
+				} else {
+					map.findAsync(key);
+				}
+			}
+		}
+		// timer1.stop();
+		// writeln(opsperloc / timer1.elapsed());
+	}
+	timer.stop();
+	writeln("Time taken: ", timer.elapsed());
+	var opspersec = N/timer.elapsed();
+	writeln("Completed ", N, " operations in ", timer.elapsed(), "s with ", opspersec, " operations/sec");
+}
+
 proc diagnosticstest() {
 	var map = new DistributedMap(int, int);
 	var tok = map.getToken();
-    startVerboseComms();
+	startVerboseComms();
 	map.insert(1, 1, tok);
 	writeln();
 	map.find(1, tok);
@@ -721,8 +765,8 @@ config const VERBOSE = false;
 
 proc main() {
 	if (VERBOSE) then startVerboseComm();
-	randomOpsStrongBenchmark(max(uint(16)));
-    if (VERBOSE) then stopVerboseComm();
+	randomAsyncOpsStrongBenchmark(max(uint(16)));
+	if (VERBOSE) then stopVerboseComm();
 	// var map = new DistributedMap(int, int);
 	// var a : [0..#ROOT_BUCKETS_SIZE] int;
 	// var b : [0..#ROOT_BUCKETS_SIZE] int;
