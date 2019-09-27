@@ -65,9 +65,9 @@ prototype module AggregationBuffer {
     type msgType;
     var lock$ : sync bool;
     // Head of list of all buffers that can be recycled.
-    var freeBufferList : unmanaged Buffer(msgType);
+    var freeBufferList : unmanaged Buffer(msgType)?;
     // Head of list of all allocated buffers.
-    var allocatedBufferList : unmanaged Buffer(msgType);
+    var allocatedBufferList : unmanaged Buffer(msgType)?;
     // Number of buffers that are available to be recycled...
     var numFreeBuffers : chpl__processorAtomicType(int);
     // Number of buffers that are currently allocated
@@ -96,14 +96,14 @@ prototype module AggregationBuffer {
       return aggregatorMaxBuffers == -1 || numAllocatedBuffers.peek() < aggregatorMaxBuffers;
     }
 
-    proc getBuffer() : unmanaged Buffer(msgType) {
-      var buf : unmanaged Buffer(msgType);
+    proc getBuffer() : unmanaged Buffer(msgType)? {
+      var buf : unmanaged Buffer(msgType)?;
 
       while buf == nil {
         // Yield while we wait for a free buffer...
         while numFreeBuffers.peek() == 0 && !canAllocateBuffer() {
-          debug(here, ": waiting on free buffer..., numAllocatedBuffers(", 
-              numAllocatedBuffers.peek(), ") / maxAllocatedBuffers(", aggregatorMaxBuffers, ")");
+          // debug(here, ": waiting on free buffer..., numAllocatedBuffers(", 
+          //     numAllocatedBuffers.peek(), ") / maxAllocatedBuffers(", aggregatorMaxBuffers, ")");
           chpl_task_yield();
         }
 
@@ -172,11 +172,11 @@ prototype module AggregationBuffer {
     pragma "no doc"
     var _stolen : chpl__processorAtomicType(bool);
     pragma "no doc"
-    var _nextAllocatedBuffer : unmanaged Buffer(msgType);
+    var _nextAllocatedBuffer : unmanaged Buffer(msgType)?;
     pragma "no doc"
-    var _nextFreeBuffer : unmanaged Buffer(msgType);
+    var _nextFreeBuffer : unmanaged Buffer(msgType)?;
     pragma "no doc"
-    var _bufferPool : unmanaged BufferPool(msgType);
+    var _bufferPool : unmanaged BufferPool(msgType)?;
 
     pragma "no doc"
     proc init(type msgType, aggregatorBufferSize : int) {
@@ -287,9 +287,9 @@ prototype module AggregationBuffer {
     pragma "no doc"
     var aggregatorMaxBuffers : int;
     pragma "no doc"
-    var destinationBuffers : [LocaleSpace] unmanaged Buffer(msgType);
+    var destinationBuffers : [LocaleSpace] unmanaged Buffer(msgType)?;
     pragma "no doc"
-    var bufferPools : [LocaleSpace] unmanaged BufferPool(msgType);
+    var bufferPools : [LocaleSpace] unmanaged BufferPool(msgType)?;
     pragma "no doc"
     var pid = -1;
 
@@ -349,18 +349,18 @@ prototype module AggregationBuffer {
       return sz;
     }
 
-    proc aggregate(msg : msgType, loc : locale) : unmanaged Buffer(msgType) {
+    proc aggregate(msg : msgType, loc : locale) : unmanaged Buffer(msgType)? {
       return aggregate(msg, loc.id);
     }
     
-    proc aggregate(msg : msgType, locid : int) : unmanaged Buffer(msgType) {
+    proc aggregate(msg : msgType, locid : int) : unmanaged Buffer(msgType)? {
       // Performs sanity checks to ensure that returned buffer is valid
-      proc doSanityCheck(buf : unmanaged Buffer(msgType)) where AggregatorDebug {
+      proc doSanityCheck(buf : unmanaged Buffer(msgType)?) where AggregatorDebug {
         if buf._stolen.peek() != false then halt("Buffer is still stolen!", buf);
         if buf._claimed.peek() != 0 then halt("Buffer has not had claim reset...", buf);
         if buf._filled.peek() != 0 then halt("Buffer has not had filled reset...", buf);
       }
-      proc doSanityCheck(buf : unmanaged Buffer(msgType)) where !AggregatorDebug {}
+      proc doSanityCheck(buf : unmanaged Buffer(msgType)?) where !AggregatorDebug {}
       
       while true {
         // Grab current buffer
@@ -371,7 +371,7 @@ prototype module AggregationBuffer {
         
         // Could not claim a valid index, yield and try again
         if claim >= buf.cap {
-          debug("Waiting on buffer ", buf, "  for locale ", here.id, " to locale ", locid);
+          // debug("Waiting on buffer ", buf, "  for locale ", here.id, " to locale ", locid);
           chpl_task_yield();
           continue;
         }
@@ -386,11 +386,11 @@ prototype module AggregationBuffer {
         // if some other thread has already stolen it, it means we don't need
         // to worry about doing any extra work...
         if nFilled == buf.cap && buf._stolen.testAndSet() == false { 
-          debug("Swapping buffer for locale ", here.id, " to locale ", locid);
+          // debug("Swapping buffer for locale ", here.id, " to locale ", locid);
           var newBuf = bufferPools[locid].getBuffer();
           doSanityCheck(newBuf);
           destinationBuffers[locid] = newBuf;
-          debug("Finished swapping buffer for locale", here.id, " to locale ", locid);
+          // debug("Finished swapping buffer for locale", here.id, " to locale ", locid);
           return buf;
         }
 
@@ -404,7 +404,7 @@ prototype module AggregationBuffer {
       halt("Serial 'flushGlobal' not implemented...");
     }
 
-    iter flushGlobal(targetLocales = Locales, param tag : iterKind) : (unmanaged Buffer(msgType), locale) where tag == iterKind.standalone {
+    iter flushGlobal(targetLocales = Locales, param tag : iterKind) : (unmanaged Buffer(msgType)?, locale) where tag == iterKind.standalone {
       const pid = this.pid;
       type thisType = this.type;
       coforall loc in targetLocales do on loc {
@@ -413,7 +413,7 @@ prototype module AggregationBuffer {
       }
     }
 
-    iter flushLocal(targetLocales = Locales) : (unmanaged Buffer(msgType), locale) {
+    iter flushLocal(targetLocales = Locales) : (unmanaged Buffer(msgType)?, locale) {
       for loc in targetLocales {
         // Flush destination buffer for each locale
         var buf = destinationBuffers[loc.id];
@@ -443,7 +443,7 @@ prototype module AggregationBuffer {
       }
     }
 
-    iter flushLocal(targetLocales = Locales, param tag : iterKind) : (unmanaged Buffer(msgType), locale) where tag == iterKind.standalone {
+    iter flushLocal(targetLocales = Locales, param tag : iterKind) : (unmanaged Buffer(msgType)?, locale) where tag == iterKind.standalone {
       forall loc in targetLocales {
         // Flush destination buffer for each locale
         var buf = destinationBuffers[loc.id];

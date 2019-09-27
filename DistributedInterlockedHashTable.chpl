@@ -249,11 +249,12 @@ record DistributedMap {
 class DistributedMapImpl {
 	type keyType;
 	type valType;
+	type msgType = (MapAction, keyType, valType?, unmanaged MapFuture(valType)?);
 	var pid : int;
 	var rootSeed : uint(64); // Same across all nodes...
 	var rootArray : unmanaged RootBucketsArray(keyType, valType);
 	var rootBuckets = _newArray(rootArray.A._value);
-	var aggregator = UninitializedAggregator((MapAction, keyType, valType?, MapFuture(valType)?));
+	var aggregator = UninitializedAggregator(msgType);
 	var manager : EpochManager;
 	var seedRNG = new owned RandomStream(uint(64), parSafe=true);
 
@@ -261,7 +262,7 @@ class DistributedMapImpl {
 		this.keyType = keyType;
 		this.valType = valType;
 		this.rootArray = new unmanaged RootBucketsArray(keyType, valType);
-		this.aggregator = new Aggregator((MapAction, keyType, valType?, MapFuture(valType)?), 64 * 1024);
+		this.aggregator = new Aggregator((msgType), 64 * 1024);
 		this.manager = new EpochManager(); // This will be shared across all instances...
 		// TODO: We need to add a `UninitializedEpochManager` helper function that will not initialize the `record`
 		// since records are initialzied by default in Chapel, regardless of what you want, with no way to avoid this.
@@ -434,7 +435,7 @@ class DistributedMapImpl {
 		on rootBuckets[idx].locale {
 			const (_key,_val) = (key, val);
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
-			local {
+			// local {
 			  var done = false;
               var elist = _this.getEList(key, true, tok);
               for i in 1..elist.count {
@@ -451,24 +452,24 @@ class DistributedMapImpl {
                 elist.values[elist.count] = _val;
                 elist.lock.write(E_AVAIL);
               }
-            }
+            // }
 		}
 		tok.unpin();
 	}
 
 	proc insertAsync(key : keyType, val : valType) {
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
-		var future : MapFuture(valType)?;
+		var future : unmanaged MapFuture(valType)?;
 		var buff = aggregator.aggregate((MapAction.insert, key, val, future), rootBuckets[idx].locale);
 		if buff != nil {
 			begin emptyBuffer(buff, rootBuckets[idx].locale);
 		}
 	}
 
-	proc findAsync(key : keyType) : MapFuture(valType) {
+	proc findAsync(key : keyType) {
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
 		var val : this.valType?;
-		var future = new MapFuture(valType);
+		var future = new unmanaged MapFuture(valType);
 		var buff = aggregator.aggregate((MapAction.find, key, val, future), rootBuckets[idx].locale);
 		if buff != nil {
 			begin emptyBuffer(buff, rootBuckets[idx].locale);
@@ -479,7 +480,7 @@ class DistributedMapImpl {
 	proc eraseAsync(key : keyType) {
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
 		var val : this.valType?;
-		var future : MapFuture(valType)?;
+		var future : unmanaged MapFuture(valType)?;
 		var buff = aggregator.aggregate((MapAction.erase, key, val, future), rootBuckets[idx].locale);
 		if buff != nil {
 			begin emptyBuffer(buff, rootBuckets[idx].locale);
@@ -487,7 +488,7 @@ class DistributedMapImpl {
 	}
 
 	// Should this be inline?
-	inline proc emptyBuffer(buffer : unmanaged Buffer, loc : locale) {
+	inline proc emptyBuffer(buffer : unmanaged Buffer(msgType)?, loc : locale) {
 		var _pid = pid;
 		on loc {
 			var buff = buffer.getArray();
@@ -517,7 +518,7 @@ class DistributedMapImpl {
 					when MapAction.find {
 						var elist = _this.getEList(key, false, tok);
 						var success = false;
-						var retVal = _this.valType?;
+						var retVal : _this.valType?;
 						if (elist != nil) {
 							for i in 1..elist.count {
 								if (elist.keys[i] == key) {
@@ -552,7 +553,13 @@ class DistributedMapImpl {
 		}
 	}
 
-	proc flushBuffers() {
+	proc flushLocalBuffers() {
+		forall (buff, loc) in aggregator.flushLocal() {
+			emptyBuffer(buff, loc);
+		}
+	}
+
+	proc flushAllBuffers() {
 		forall (buff, loc) in aggregator.flushGlobal() {
 			emptyBuffer(buff, loc);
 		}
@@ -568,7 +575,7 @@ class DistributedMapImpl {
 			const _key = key;
             var (tmpres, tmpresVal) : (bool, valType);
             var _this = chpl_getPrivatizedCopy(this.type, _pid);
-			local {
+			// local {
               var elist = _this.getEList(key, false, tok);
               if (elist != nil) {
                 for i in 1..elist.count {
@@ -579,7 +586,7 @@ class DistributedMapImpl {
                 }
                 elist.lock.write(E_AVAIL);
               }
-            }
+            // }
             (res, resVal) = (tmpres, tmpresVal);
 		}
 		tok.unpin();
@@ -594,7 +601,7 @@ class DistributedMapImpl {
 			const _key = key;
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
 			// var (elist, pList, idx) = getPEList(key, false, tok);
-			local {
+			// local {
               var elist = _this.getEList(_key, false, tok);
               if (elist != nil) {
                 for i in 1..elist.count {
@@ -608,7 +615,7 @@ class DistributedMapImpl {
                 }
                 elist.lock.write(E_AVAIL);
               }
-            }
+            // }
 
 			// if elist.count == 0 {
 			// 	pList.buckets[idx].write(nil);
@@ -740,9 +747,11 @@ proc randomAsyncOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 				}
 			}
 		}
+		map.flushLocalBuffers();
 		// timer1.stop();
 		// writeln(opsperloc / timer1.elapsed());
 	}
+	// map.flushBuffers();
 	timer.stop();
 	writeln("Time taken: ", timer.elapsed());
 	var opspersec = N/timer.elapsed();
