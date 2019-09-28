@@ -22,6 +22,7 @@ config const VERBOSE = false;
 config const DFS = false;
 config const VDEBUG = false;
 config const PRINT_TIME = false;
+config const GETELIST_COUNT = false;
 config const ROOT_BUCKETS_SIZE = DEFAULT_NUM_BUCKETS * Locales.size;
 
 // Note: Once this becomes distributed, we have to make it per-locale
@@ -295,15 +296,20 @@ class DistributedMapImpl {
 	}
 
 	proc getEList(key : keyType, isInsertion : bool, tok) {
+		var rootCount = 0;
 		var curr : unmanaged Buckets(keyType, valType)? = nil;
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
 		var shouldYield = false;
 		while (true) {
+			rootCount += 1;
 			var next = rootBuckets[idx].read();
 			if (next == nil) {
 				// If we're not inserting something, I.E we are removing
 				// or retreiving, we are done.
-				if !isInsertion then return nil;
+				if !isInsertion {
+					if GETELIST_COUNT then writeln(rootCount, " ", rootCount, " ", 0);
+					return nil;
+				}
 
 				// Otherwise, speculatively create a new bucket to add in.
 				var newList = new unmanaged Bucket(this.keyType, this.valType);
@@ -311,6 +317,7 @@ class DistributedMapImpl {
 
 				// We set our Bucket, we also own it so return it
 				if (this.rootBuckets[idx].compareAndSwap(nil, newList)) {
+					if GETELIST_COUNT then writeln(rootCount, " ", rootCount, " ", 0);
 					return newList;
 				} else {
 					// Someone else set their bucket, reload.
@@ -325,15 +332,21 @@ class DistributedMapImpl {
 				// We now own the bucket...
 				if (next.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
 					// Non-insertions don't care.
-					if !isInsertion then return next : unmanaged Bucket(keyType, valType);
+					if !isInsertion {
+						if GETELIST_COUNT then writeln(rootCount, " ", rootCount, " ", 0);
+						return next : unmanaged Bucket(keyType, valType);
+					}
 					// Insertions cannot have a full bucket...
 					// If it is not full return it
 					var bucket = next : unmanaged Bucket(keyType, valType)?;
-					if bucket.count < BUCKET_NUM_ELEMS then
+					if bucket.count < BUCKET_NUM_ELEMS {
+						if GETELIST_COUNT then writeln(rootCount, " ", rootCount, " ", 0);
 						return bucket;
+					}
 
 					for k in bucket.keys {
 						if k == key {
+							if GETELIST_COUNT then writeln(rootCount, " ", rootCount, " ", 0);
 							return bucket;
 						}
 					}
@@ -366,13 +379,19 @@ class DistributedMapImpl {
 		}
 		shouldYield = false;
 
+		var loopCount = 0;
+
 		while (true) {
+			loopCount += 1;
 			var idx = (curr.hash(key) % (curr.buckets.size):uint):int;
 			var next = curr.buckets[idx].read();
 			if (next == nil) {
 				// If we're not inserting something, I.E we are removing
 				// or retreiving, we are done.
-				if !isInsertion then return nil;
+				if !isInsertion {
+					if GETELIST_COUNT then writeln(rootCount + loopCount, " ", rootCount, " ", loopCount);
+					return nil;
+				}
 
 				// Otherwise, speculatively create a new bucket to add in.
 				var newList = new unmanaged Bucket(keyType, valType);
@@ -380,6 +399,7 @@ class DistributedMapImpl {
 
 				// We set our Bucket, we also own it so return it
 				if (curr.buckets[idx].compareAndSwap(nil, newList)) {
+					if GETELIST_COUNT then writeln(rootCount + loopCount, " ", rootCount, " ", loopCount);
 					return newList;
 				} else {
 					// Someone else set their bucket, reload.
@@ -393,15 +413,21 @@ class DistributedMapImpl {
 				// We now own the bucket...
 				if (next.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
 					// Non-insertions don't care.
-					if !isInsertion then return next : unmanaged Bucket(keyType, valType);
+					if !isInsertion {
+						if GETELIST_COUNT then writeln(rootCount + loopCount, " ", rootCount, " ", loopCount);
+						return next : unmanaged Bucket(keyType, valType);
+					}
 					// Insertions cannot have a full bucket...
 					// If it is not full return it
 					var bucket = next : unmanaged Bucket(keyType, valType)?;
-					if bucket.count < BUCKET_NUM_ELEMS then
+					if bucket.count < BUCKET_NUM_ELEMS {
+						if GETELIST_COUNT then writeln(rootCount + loopCount, " ", rootCount, " ", loopCount);
 						return bucket;
+					}
 
 					for k in bucket.keys {
 						if k == key {
+							if GETELIST_COUNT then writeln(rootCount + loopCount, " ", rootCount, " ", loopCount);
 							return bucket;
 						}
 					}
@@ -567,11 +593,12 @@ class DistributedMapImpl {
 				select action {
 					when MapAction.insert {
 						var timer1 = new Timer();
-						if PRINT_TIME {
-							timer1.start();
-						}
+						if PRINT_TIME then timer1.start();
 						var elist = _this.getEList(key, true, tok);
-						if PRINT_TIME then writeln(timer1.elapsed(), " getEList");
+						if PRINT_TIME {
+							var tm = timer1.elapsed();
+							writeln(tm, " getEList");
+						}
 						var done = false;
 						for i in 1..elist.count {
 							if (elist.keys[i] == key) {
@@ -622,7 +649,10 @@ class DistributedMapImpl {
 							timer1.start();
 						}
 						var elist = _this.getEList(key, false, tok);
-						if PRINT_TIME then writeln(timer1.elapsed(), " getEList");
+						if PRINT_TIME {
+							var tm = timer1.elapsed();
+							writeln(tm, " getEList");
+						}
 						if (elist != nil) {
 							for i in 1..elist.count {
 								if (elist.keys[i] == key) {
@@ -900,7 +930,7 @@ proc randomAsyncOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 	if !FLUSHLOCAL then map.flushAllBuffers();
 	timer.stop();
 	if VDEBUG then stopVdebug();
-	writeln("Time taken: ", timer.elapsed());
+	writeln("Time taken : ", timer.elapsed());
 	var opspersec = N/timer.elapsed();
 	writeln("Completed ", N, " operations in ", timer.elapsed(), "s with ", opspersec, " operations/sec");
 	if DFS then map.dfs();

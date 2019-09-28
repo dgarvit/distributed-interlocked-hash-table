@@ -20,7 +20,7 @@ for i in xrange(0, len(times)-1):
     if str(times[i][1]) != str(times[i+1][1]):
         minStr = "Min " + str(times[i][1]) + ": " + str(times[i][0])
         maxStr = "Max " + str(times[i+1][1]) + ": " + str(times[i+1][0])
-        avgStr = "Avg " + str(times[i+1][1]) + ": " + str(b/count)
+        avgStr = "Avg " + str(times[i][1]) + ": " + str(b/count)
         print minStr
         print avgStr
         print ""
