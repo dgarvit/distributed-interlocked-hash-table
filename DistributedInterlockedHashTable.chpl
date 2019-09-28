@@ -7,6 +7,7 @@ use BlockDist;
 use VisualDebug;
 use CommDiagnostics;
 use AggregationBuffer;
+use Time;
 
 param BUCKET_UNLOCKED = 0;
 param BUCKET_LOCKED = 1;
@@ -20,6 +21,7 @@ config const FLUSHLOCAL = true;
 config const VERBOSE = false;
 config const DFS = false;
 config const VDEBUG = false;
+config const PRINT_TIME = false;
 config const ROOT_BUCKETS_SIZE = DEFAULT_NUM_BUCKETS * Locales.size;
 
 // Note: Once this becomes distributed, we have to make it per-locale
@@ -461,10 +463,10 @@ class DistributedMapImpl {
 
 	proc insertAsync(key : keyType, val : valType, tok) {
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
-		if here == rootBuckets[idx].locale {
-			insertLocal(key, val, tok);
-			return;
-		}
+		// if here == rootBuckets[idx].locale {
+		// 	insertLocal(key, val, tok);
+		// 	return;
+		// }
 		var future : unmanaged MapFuture(valType)?;
 		var buff = aggregator.aggregate((MapAction.insert, key, val, future), rootBuckets[idx].locale);
 		if buff != nil {
@@ -485,10 +487,10 @@ class DistributedMapImpl {
 
 	proc eraseAsync(key : keyType, tok) {
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
-		if here == rootBuckets[idx].locale {
-			eraseLocal(key, tok);
-			return;
-		}
+		// if here == rootBuckets[idx].locale {
+		// 	eraseLocal(key, tok);
+		// 	return;
+		// }
 		var val : this.valType?;
 		var future : unmanaged MapFuture(valType)?;
 		var buff = aggregator.aggregate((MapAction.erase, key, val, future), rootBuckets[idx].locale);
@@ -552,6 +554,10 @@ class DistributedMapImpl {
 	// Should this be inline?
 	proc emptyBuffer(buffer : unmanaged Buffer(msgType)?, loc : locale) {
 		var _pid = pid;
+		var timer = new Timer();
+		if PRINT_TIME {
+			timer.start();
+		}
 		on loc {
 			var buff = buffer.getArray();
 			buffer.done();
@@ -560,7 +566,12 @@ class DistributedMapImpl {
 				tok.pin();
 				select action {
 					when MapAction.insert {
+						var timer1 = new Timer();
+						if PRINT_TIME {
+							timer1.start();
+						}
 						var elist = _this.getEList(key, true, tok);
+						if PRINT_TIME then writeln(timer1.elapsed(), " getEList");
 						var done = false;
 						for i in 1..elist.count {
 							if (elist.keys[i] == key) {
@@ -574,6 +585,10 @@ class DistributedMapImpl {
 							elist.keys[elist.count] = key;
 							elist.values[elist.count] = val;
 							elist.lock.write(E_AVAIL);
+						}
+						if PRINT_TIME {
+							timer1.stop();
+							writeln(timer1.elapsed(), " insertAction");
 						}
 					}
 
@@ -602,7 +617,12 @@ class DistributedMapImpl {
 					}
 
 					when MapAction.erase {
+						var timer1 = new Timer();
+						if PRINT_TIME {
+							timer1.start();
+						}
 						var elist = _this.getEList(key, false, tok);
+						if PRINT_TIME then writeln(timer1.elapsed(), " getEList");
 						if (elist != nil) {
 							for i in 1..elist.count {
 								if (elist.keys[i] == key) {
@@ -614,22 +634,46 @@ class DistributedMapImpl {
 							}
 							elist.lock.write(E_AVAIL);
 						}
+						if PRINT_TIME {
+							timer1.stop();
+							writeln(timer1.elapsed(), " eraseAction");
+						}
 					}
 				}
 				tok.unpin();
 			}
 		}
+		if PRINT_TIME {
+			timer.stop();
+			writeln(timer.elapsed(), " emptyBuffer");
+		}
 	}
 
 	proc flushLocalBuffers() {
+		var timer = new Timer();
+		if PRINT_TIME {
+			timer.start();
+		}
 		forall (buff, loc) in aggregator.flushLocal() {
 			emptyBuffer(buff, loc);
+		}
+		if PRINT_TIME {
+			timer.stop();
+			writeln(timer.elapsed(), " flushLocalBuffers");
 		}
 	}
 
 	proc flushAllBuffers() {
+		var timer = new Timer();
+		if PRINT_TIME {
+			timer.start();
+		}
 		forall (buff, loc) in aggregator.flushGlobal() {
 			emptyBuffer(buff, loc);
+		}
+		if PRINT_TIME {
+			timer.stop();
+			writeln(timer.elapsed(), " flushLocalBuffers");
 		}
 	}
 
@@ -736,7 +780,6 @@ class DistributedMapImpl {
 }
 
 config const N = 1024 * 1024;
-use Time;
 
 proc randomOpsBenchmark (maxLimit : uint = max(uint(16))) {
 	var timer = new Timer();
