@@ -596,7 +596,7 @@ proc randomOpsBenchmark (maxLimit : uint = max(uint(16))) {
 	// Use map as an integer-based set
 	writeln("Random operations test: ");
 	var timer = new Timer();
-	var set : domain(int, parSafe=true);
+	/*var set : domain(int, parSafe=true);
 	for i in 1..(maxLimit:int) {
 		set += i;
 	}
@@ -619,7 +619,7 @@ proc randomOpsBenchmark (maxLimit : uint = max(uint(16))) {
 	timer.stop();
 	writeln("Assocaitive Array: ", timer.elapsed());
 	timer.clear();
-
+*/
 	var map = new ConcurrentMap(int, int);
 	map.insert(1..(maxLimit:int), 0);
 	timer.start();
@@ -630,12 +630,10 @@ proc randomOpsBenchmark (maxLimit : uint = max(uint(16))) {
 		for i in 1..N {
 			var s = rng.getNext();
 			var key = keyRng.getNext(0, maxLimit:int);
-			if s < 0.33 {
+			if s < 0.5 {
 				map.insert(key,i,tok);
-			} else if s < 0.66 {
-				map.erase(key, tok);
 			} else {
-				map.find(key, tok);
+				map.erase(key, tok);
 			}
 		}
 	}
@@ -643,6 +641,35 @@ proc randomOpsBenchmark (maxLimit : uint = max(uint(16))) {
 	writeln("Concurrent Map: ", timer.elapsed());
 	timer.clear();
 	writeln();
+}
+
+
+proc randomOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
+	var timer = new Timer();
+	var map = new ConcurrentMap(int, int);
+	map.insert(1..65536, 0);
+	timer.start();
+  	coforall tid in 1..here.maxTaskPar {
+      var rng = new RandomStream(real);
+	  var keyRng = new RandomStream(int);
+	  const opspertask = N / here.maxTaskPar;
+	  var tok = map.getToken();
+	  for i in 1..opspertask {
+	    var s = rng.getNext();
+		var key = keyRng.getNext(0, maxLimit:int);
+		  if s < 0.5 {
+			map.insert(key,i, tok);
+		  } else {
+			map.erase(key, tok);
+		  }
+		}
+		// timer1.stop();
+		// writeln(opsperloc / timer1.elapsed());
+	}
+	timer.stop();
+	writeln("Time taken : ", timer.elapsed());
+	var opspersec = N/timer.elapsed();
+	writeln("Completed ", N, " operations in ", timer.elapsed(), "s with ", opspersec, " operations/sec");
 }
 
 proc iterationBenchmark() {
@@ -668,7 +695,7 @@ proc iterationBenchmark() {
 }
 
 proc main() {
-	randomOpsBenchmark(max(uint(16)));
+	randomOpsStrongBenchmark(max(uint(32)));
 	iterationBenchmark();
 	// var map = new ConcurrentMap(int, int);
 	// var dist : [0..#DEFAULT_NUM_BUCKETS] int;
