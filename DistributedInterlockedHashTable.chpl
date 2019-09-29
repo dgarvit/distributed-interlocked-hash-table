@@ -489,10 +489,10 @@ class DistributedMapImpl {
 
 	proc insertAsync(key : keyType, val : valType, tok) {
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
-		// if here == rootBuckets[idx].locale {
-		// 	insertLocal(key, val, tok);
-		// 	return;
-		// }
+		if here == rootBuckets[idx].locale {
+			insertLocal(key, val, tok);
+			return;
+		}
 		var future : unmanaged MapFuture(valType)?;
 		var buff = aggregator.aggregate((MapAction.insert, key, val, future), rootBuckets[idx].locale);
 		if buff != nil {
@@ -500,10 +500,16 @@ class DistributedMapImpl {
 		}
 	}
 
-	proc findAsync(key : keyType) {
+	proc findAsync(key : keyType, tok) {
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
-		var val : this.valType?;
 		var future = new unmanaged MapFuture(valType);
+		if here == rootBuckets[idx].locale {
+			var (found, val) = findLocal(key, tok);
+			if found then future.success(val);
+			else future.fail();
+			return future;
+		}
+		var val : this.valType?;
 		var buff = aggregator.aggregate((MapAction.find, key, val, future), rootBuckets[idx].locale);
 		if buff != nil {
 			begin emptyBuffer(buff, rootBuckets[idx].locale);
@@ -513,10 +519,10 @@ class DistributedMapImpl {
 
 	proc eraseAsync(key : keyType, tok) {
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
-		// if here == rootBuckets[idx].locale {
-		// 	eraseLocal(key, tok);
-		// 	return;
-		// }
+		if here == rootBuckets[idx].locale {
+			eraseLocal(key, tok);
+			return;
+		}
 		var val : this.valType?;
 		var future : unmanaged MapFuture(valType)?;
 		var buff = aggregator.aggregate((MapAction.erase, key, val, future), rootBuckets[idx].locale);
@@ -905,22 +911,22 @@ proc randomAsyncOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 			var rng = new RandomStream(real);
 			var keyRng = new RandomStream(int);
 			const opspertask = opsperloc / here.maxTaskPar;
+			var tok = map.getToken();
 			for i in 1..opspertask {
-				var tok = map.getToken();
 				var s = rng.getNext();
 				var key = keyRng.getNext(0, maxLimit:int);
-				// if s < 0.33 {
-				// 	map.insertAsync(key,i);
-				// } else if s < 0.66 {
-				// 	map.eraseAsync(key);
-				// } else {
-				// 	map.findAsync(key);
-				// }
-				if s < 0.5 {
+				if s < 0.33 {
 					map.insertAsync(key,i, tok);
-				} else {
+				} else if s < 0.66 {
 					map.eraseAsync(key, tok);
+				} else {
+					map.findAsync(key, tok);
 				}
+				// if s < 0.5 {
+				// 	map.insertAsync(key,i, tok);
+				// } else {
+				// 	map.eraseAsync(key, tok);
+				// }
 			}
 		}
 		if FLUSHLOCAL then map.flushLocalBuffers();
