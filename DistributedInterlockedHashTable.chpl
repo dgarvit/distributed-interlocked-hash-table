@@ -9,9 +9,6 @@ use CommDiagnostics;
 use AggregationBuffer;
 use Time;
 
-param BUCKET_UNLOCKED = 0;
-param BUCKET_LOCKED = 1;
-param BUCKET_DESTROYED = 2;
 config param BUCKET_NUM_ELEMS = 8;
 config const DEFAULT_NUM_BUCKETS = 1024;
 config param MULTIPLIER_NUM_BUCKETS : real = 2;
@@ -167,6 +164,17 @@ class Bucket : Base {
 	proc releaseLock() {
 		if (lock.read() == E_LOCK) then lock.write(E_AVAIL);
 	}
+
+    proc readWriteThis(f) {
+      f <~> "(ElementList) {\n\tcount=%@xu\n\t".format(count);
+      for i in 1..8 {
+        f <~> "keys[%i] = %@xu, values[%i] = %@xu\n\t".format(i, keys[i], i, values[i]);
+      }
+      if parent != nil {
+        f <~> "parent = " <~> parent;
+      }
+      f <~> "\n}";
+    }
 }
 
 class Buckets : Base {
@@ -192,6 +200,16 @@ class Buckets : Base {
 		if (lock.read() == P_LOCK) then lock.write(P_TERM);
 	}
 
+    proc readWriteThis(f) {
+      f <~> "(PointerList) {\n\t";
+      for (idx, bucket) in zip(bucketsDom, buckets) {
+        if bucket.read() != nil {
+          f <~> "[%i]: %@xu\n\t".format(idx, bucket.atomicVar.read()); 
+        }
+      }
+      f <~> "\n}";
+    }
+
 	// proc size return buckets.size;
 }
 
@@ -202,7 +220,7 @@ class Buckets : Base {
 class RootBucketsArray {
 	type keyType;
 	type valType;
-	var D = {0..#ROOT_BUCKETS_SIZE} dmapped Block(boundingBox={0..#ROOT_BUCKETS_SIZE}, targetLocales=Locales);
+	var D = {0..#ROOT_BUCKETS_SIZE} dmapped Block(boundingBox={0..#ROOT_BUCKETS_SIZE});
 	var A : [D] AtomicObject(unmanaged Base(keyType?, valType?)?, hasABASupport=false, hasGlobalSupport=true);
 }
 
@@ -356,8 +374,10 @@ class DistributedMapImpl {
 					for (k,v) in zip(bucket.keys, bucket.values) {
 						var idx = (newBuckets.hash(k) % newBuckets.buckets.size:uint):int;
 						if newBuckets.buckets[idx].read() == nil {
-							newBuckets.buckets[idx].write(new unmanaged Bucket(keyType, valType));
-						}
+						  var newBucket = new unmanaged Bucket(keyType, valType);
+                          newBucket.parent = newBuckets;
+                          newBuckets.buckets[idx].write(newBucket);
+                        }
 						var buck = newBuckets.buckets[idx].read() : unmanaged Bucket(keyType, valType)?;
 						buck.count += 1;
 						buck.keys[buck.count] = k;
@@ -384,7 +404,8 @@ class DistributedMapImpl {
 		while (true) {
 			loopCount += 1;
 			var idx = (curr.hash(key) % (curr.buckets.size):uint):int;
-			var next = curr.buckets[idx].read();
+			assert(curr.buckets.domain.contains(idx), "Bad idx ", idx, " not in domain ", curr.buckets.domain);
+            var next = curr.buckets[idx].read();
 			if (next == nil) {
 				// If we're not inserting something, I.E we are removing
 				// or retreiving, we are done.
@@ -395,6 +416,7 @@ class DistributedMapImpl {
 
 				// Otherwise, speculatively create a new bucket to add in.
 				var newList = new unmanaged Bucket(keyType, valType);
+                newList.parent = curr;
 				newList.lock.write(E_LOCK);
 
 				// We set our Bucket, we also own it so return it
@@ -437,7 +459,9 @@ class DistributedMapImpl {
 					for (k,v) in zip(bucket.keys, bucket.values) {
 						var idx = (newBuckets.hash(k) % newBuckets.buckets.size:uint):int;
 						if newBuckets.buckets[idx].read() == nil {
-							newBuckets.buckets[idx].write(new unmanaged Bucket(keyType, valType));
+                          var newBucket = new unmanaged Bucket(keyType, valType);
+                          newBucket.parent = newBuckets;
+							newBuckets.buckets[idx].write(newBucket);
 						}
 						var buck = newBuckets.buckets[idx].read() : unmanaged Bucket(keyType, valType)?;
 						buck.count += 1;
@@ -489,7 +513,7 @@ class DistributedMapImpl {
 
 	proc insertAsync(key : keyType, val : valType, tok) {
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
-		if here == rootBuckets[idx].locale {
+		if here.id == rootBuckets[idx].locale.id {
 			insertLocal(key, val, tok);
 			return;
 		}
@@ -503,12 +527,12 @@ class DistributedMapImpl {
 	proc findAsync(key : keyType, tok) {
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
 		var future = new unmanaged MapFuture(valType);
-		if here == rootBuckets[idx].locale {
-			var (found, val) = findLocal(key, tok);
-			if found then future.success(val);
-			else future.fail();
-			return future;
-		}
+		//if here.id == rootBuckets[idx].locale.id {
+		//	var (found, val) = findLocal(key, tok);
+		//	if found then future.success(val);
+		//	else future.fail();
+		//	return future;
+		//}
 		var val : this.valType?;
 		var buff = aggregator.aggregate((MapAction.find, key, val, future), rootBuckets[idx].locale);
 		if buff != nil {
@@ -519,7 +543,7 @@ class DistributedMapImpl {
 
 	proc eraseAsync(key : keyType, tok) {
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
-		if here == rootBuckets[idx].locale {
+		if here.id == rootBuckets[idx].locale.id {
 			eraseLocal(key, tok);
 			return;
 		}
@@ -630,6 +654,7 @@ class DistributedMapImpl {
 						var success = false;
 						var retVal : _this.valType?;
 						if (elist != nil) {
+                          assert(elist.count <= 8, elist);
 							for i in 1..elist.count {
 								if (elist.keys[i] == key) {
 									retVal = elist.values[i];
@@ -638,6 +663,7 @@ class DistributedMapImpl {
 								}
 							}
 							elist.lock.write(E_AVAIL);
+                            assert(future != nil);
 							if success {
 								future.found = true; // call this using `on`?
 								future.val = retVal;
@@ -660,6 +686,7 @@ class DistributedMapImpl {
 							writeln(tm, " getEList");
 						}
 						if (elist != nil) {
+                          assert(elist.count <= 8, elist);
 							for i in 1..elist.count {
 								if (elist.keys[i] == key) {
 									elist.keys[i] = elist.keys[elist.count];
@@ -899,7 +926,7 @@ proc randomAsyncOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 	var map = new DistributedMap(int, int);
 	// var tok = map.getToken();
 	// tok.pin();
-	// map.insert(1..65536, 0);
+	map.insert(1..65536, 0);
 	// tok.unpin();
 	if VDEBUG then startVdebug("DIHT");
 	timer.start();
@@ -920,7 +947,7 @@ proc randomAsyncOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 				} else if s < 0.66 {
 					map.eraseAsync(key, tok);
 				} else {
-					map.findAsync(key, tok);
+					var tmp = map.findAsync(key, tok);
 				}
 				// if s < 0.5 {
 				// 	map.insertAsync(key,i, tok);
@@ -956,7 +983,7 @@ proc diagnosticstest() {
 
 proc main() {
 	if (VERBOSE) then startVerboseComm();
-	randomAsyncOpsStrongBenchmark(max(uint(32)));
+	randomAsyncOpsStrongBenchmark(max(uint(16)));
 	if (VERBOSE) then stopVerboseComm();
 	// var map = new DistributedMap(int, int);
 	// var a : [0..#ROOT_BUCKETS_SIZE] int;
