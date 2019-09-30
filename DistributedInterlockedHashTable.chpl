@@ -21,6 +21,7 @@ config const VDEBUG = false;
 config const PRINT_TIME = false;
 config const GETELIST_COUNT = false;
 config const ROOT_BUCKETS_SIZE = DEFAULT_NUM_BUCKETS * Locales.size;
+config const BUFFER_SIZE = 8 * 1024;
 
 // Note: Once this becomes distributed, we have to make it per-locale
 // var seedRNG = new owned RandomStream(uint(64), parSafe=true);
@@ -289,7 +290,7 @@ class DistributedMapImpl {
 		this.keyType = keyType;
 		this.valType = valType;
 		this.rootArray = new unmanaged RootBucketsArray(keyType, valType);
-		this.aggregator = new Aggregator((msgType), 64 * 1024);
+		this.aggregator = new Aggregator((msgType), BUFFER_SIZE);
 		this.manager = new EpochManager(); // This will be shared across all instances...
 		// TODO: We need to add a `UninitializedEpochManager` helper function that will not initialize the `record`
 		// since records are initialzied by default in Chapel, regardless of what you want, with no way to avoid this.
