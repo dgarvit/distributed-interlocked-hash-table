@@ -196,6 +196,10 @@ class Buckets : Base {
 		return _gen_key(chpl__defaultHashCombine(chpl__defaultHash(key), seed, 1));
 	}
 
+	proc _hash(key) {
+		return _gen_key(chpl__defaultHashCombine(key, seed, 1));
+	}
+
 	proc releaseLock() {
 		if (lock.read() == P_LOCK) then lock.write(P_TERM);
 	}
@@ -313,14 +317,26 @@ class DistributedMapImpl {
 		return _gen_key(chpl__defaultHashCombine(chpl__defaultHash(key), this.rootSeed, 1));
 	}
 
+	proc _rootHash(key) {
+		return _gen_key(chpl__defaultHashCombine(key, this.rootSeed, 1));
+	}
+
 	proc getEList(key : keyType, isInsertion : bool, tok) {
 		var rootCount = 0;
 		var curr : unmanaged Buckets(keyType, valType)? = nil;
-		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
+		const defaultHash = chpl__defaultHash(key);
+		var idx = (this._rootHash(defaultHash) % (this.rootBuckets.size):uint):int;
 		var shouldYield = false;
 		while (true) {
 			rootCount += 1;
 			var next = rootBuckets[idx].read();
+			// if (next != nil) {
+			// 	var lock = next.lock.read();
+			// 	if (lock == E_AVAIL || lock == E_LOCK) {
+			// 		var elist = next : unmanaged Bucket(keyType, valType);
+			// 		assert(elist.count <= 8, elist);
+			// 	}
+			// }
 			if (next == nil) {
 				// If we're not inserting something, I.E we are removing
 				// or retreiving, we are done.
@@ -401,11 +417,18 @@ class DistributedMapImpl {
 
 		var loopCount = 0;
 
+		idx = (curr._hash(defaultHash) % (curr.buckets.size):uint):int;
 		while (true) {
 			loopCount += 1;
-			var idx = (curr.hash(key) % (curr.buckets.size):uint):int;
 			assert(curr.buckets.domain.contains(idx), "Bad idx ", idx, " not in domain ", curr.buckets.domain);
-            var next = curr.buckets[idx].read();
+      var next = curr.buckets[idx].read();
+			// if (next != nil) {
+			// 	var lock = next.lock.read();
+			// 	if (lock == E_AVAIL || lock == E_LOCK) {
+			// 		var elist = next : unmanaged Bucket(keyType, valType);
+			// 		assert(elist.count <= 8, elist);
+			// 	}
+			// }
 			if (next == nil) {
 				// If we're not inserting something, I.E we are removing
 				// or retreiving, we are done.
@@ -430,6 +453,7 @@ class DistributedMapImpl {
 			}
 			else if (next.lock.read() == P_INNER) {
 				curr = next : unmanaged Buckets(keyType, valType);
+				idx = (curr._hash(defaultHash) % (curr.buckets.size):uint):int;
 			}
 			else if (next.lock.read() == E_AVAIL) {
 				// We now own the bucket...
@@ -473,6 +497,7 @@ class DistributedMapImpl {
 					tok.deferDelete(next); // tok could be from another locale... Overhead?
 					curr.buckets[idx].write(newBuckets: unmanaged Base(keyType, valType));
 					curr = newBuckets;
+					idx = (curr._hash(defaultHash) % (curr.buckets.size):uint):int;
 				}
 			}
 
@@ -891,8 +916,6 @@ proc randomOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 	timer.start();
 	coforall loc in Locales do on loc {
 		const opsperloc = N / Locales.size;
-		var timer1 = new Timer();
-		timer1.start();
 		coforall tid in 1..here.maxTaskPar {
 			var tok = map.getToken();
 			tok.pin();
@@ -912,8 +935,6 @@ proc randomOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 			}
 			tok.unpin();
 		}
-		timer1.stop();
-		writeln(opsperloc / timer1.elapsed());
 	}
 	timer.stop();
 	writeln("Time taken: ", timer.elapsed());
@@ -942,18 +963,18 @@ proc randomAsyncOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 			for i in 1..opspertask {
 				var s = rng.getNext();
 				var key = keyRng.getNext(0, maxLimit:int);
-				if s < 0.33 {
-					map.insertAsync(key,i, tok);
-				} else if s < 0.66 {
-					map.eraseAsync(key, tok);
-				} else {
-					var tmp = map.findAsync(key, tok);
-				}
-				// if s < 0.5 {
+				// if s < 0.33 {
 				// 	map.insertAsync(key,i, tok);
-				// } else {
+				// } else if s < 0.66 {
 				// 	map.eraseAsync(key, tok);
+				// } else {
+				// 	var tmp = map.findAsync(key, tok);
 				// }
+				if s < 0.5 {
+					map.insertAsync(key,i, tok);
+				} else {
+					map.eraseAsync(key, tok);
+				}
 			}
 		}
 		if FLUSHLOCAL then map.flushLocalBuffers();
