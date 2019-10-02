@@ -340,12 +340,14 @@ class DistributedMapImpl {
 		return _gen_key(chpl__defaultHashCombine(key, this.rootSeed, 1));
 	}
 
-	proc getEList(key : keyType, isInsertion : bool, defaultHash, _idx, tok) {
-		var curr : unmanaged Buckets(keyType, valType)? = nil;
+	proc getEList(key : keyType, isInsertion : bool, defaultHash, _idx, tok) : (unmanaged Bucket(keyType, valType)?, int) {
+		var curr : unmanaged Buckets(this.keyType, this.valType)? = nil;
 		// const defaultHash = chpl__defaultHash(key);
 		// var idx = (this._rootHash(defaultHash) % (this.rootBuckets.size):uint):int;
 		var idx = _idx;
 		var shouldYield = false;
+		var nilBucket : unmanaged Bucket(this.keyType, this.valType)? = nil;
+		var retNil = (nilBucket, -1);
 		while (true) {
 			var next = rootBuckets[idx].read();
 			// if (next != nil) {
@@ -359,7 +361,7 @@ class DistributedMapImpl {
 				// If we're not inserting something, I.E we are removing
 				// or retreiving, we are done.
 				if !isInsertion {
-					return nil;
+					return retNil;
 				}
 
 				// Otherwise, speculatively create a new bucket to add in.
@@ -368,7 +370,7 @@ class DistributedMapImpl {
 
 				// We set our Bucket, we also own it so return it
 				if (this.rootBuckets[idx].compareAndSwap(nil, newList)) {
-					return newList;
+					return (newList, 1);
 				} else {
 					// Someone else set their bucket, reload.
 					delete newList;
@@ -383,18 +385,18 @@ class DistributedMapImpl {
 				if (next.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
 					// Non-insertions don't care.
 					if !isInsertion {
-						return next : unmanaged Bucket(keyType, valType);
+						return (next : unmanaged Bucket(keyType, valType), -1);
 					}
 					// Insertions cannot have a full bucket...
 					// If it is not full return it
 					var bucket = next : unmanaged Bucket(keyType, valType)?;
 					if bucket.count < BUCKET_NUM_ELEMS {
-						return bucket;
+						return (bucket, -1);
 					}
 
-					for k in bucket.keys {
-						if k == key {
-							return bucket;
+					for i in 1..BUCKET_NUM_ELEMS {
+						if bucket.keys[i] == key {
+							return (bucket, i);
 						}
 					}
 
@@ -444,7 +446,7 @@ class DistributedMapImpl {
 				// If we're not inserting something, I.E we are removing
 				// or retreiving, we are done.
 				if !isInsertion {
-					return nil;
+					return retNil;
 				}
 
 				// Otherwise, speculatively create a new bucket to add in.
@@ -454,7 +456,7 @@ class DistributedMapImpl {
 
 				// We set our Bucket, we also own it so return it
 				if (curr.buckets[idx].compareAndSwap(nil, newList)) {
-					return newList;
+					return (newList, 1);
 				} else {
 					// Someone else set their bucket, reload.
 					delete newList;
@@ -469,18 +471,18 @@ class DistributedMapImpl {
 				if (next.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
 					// Non-insertions don't care.
 					if !isInsertion {
-						return next : unmanaged Bucket(keyType, valType);
+						return (next : unmanaged Bucket(keyType, valType), -1);
 					}
 					// Insertions cannot have a full bucket...
 					// If it is not full return it
 					var bucket = next : unmanaged Bucket(keyType, valType)?;
 					if bucket.count < BUCKET_NUM_ELEMS {
-						return bucket;
+						return (bucket, -1);
 					}
 
-					for k in bucket.keys {
-						if k == key {
-							return bucket;
+					for i in 1..BUCKET_NUM_ELEMS {
+						if bucket.keys[i] == key {
+							return (bucket, i);
 						}
 					}
 
@@ -510,7 +512,7 @@ class DistributedMapImpl {
 			if shouldYield then chpl_task_yield(); // If lock could not be acquired
 			shouldYield = true;
 		}
-		return nil;
+		return retNil;
 	}
 
 	proc insert(key : keyType, val : valType, tok : owned DistTokenWrapper = getToken()) {
@@ -590,13 +592,28 @@ class DistributedMapImpl {
 
 	inline proc insertLocal(key : keyType, val : valType, defaultHash, idx, tok) {
 		tok.pin();
-		var elist = getEList(key, true, defaultHash, idx, tok);
-		for i in 1..elist.count {
-			if (elist.keys[i] == key) {
-				elist.lock.write(E_AVAIL);
-				tok.unpin();
-				return;
+		var (elist, keyIdx) = getEList(key, true, defaultHash, idx, tok);
+		if (keyIdx == -1) {
+			for i in 1..elist.count {
+				if (elist.keys[i] == key) {
+					elist.values[i] = val;
+					elist.lock.write(E_AVAIL);
+					tok.unpin();
+					return;
+				}
 			}
+		} else if (keyIdx == 1) {
+			elist.keys[keyIdx] = key;
+			elist.values[keyIdx] = val;
+			elist.count += 1;
+			elist.lock.write(E_AVAIL);
+			tok.unpin();
+			return;
+		} else {
+			elist.values[keyIdx] = val;
+			elist.lock.write(E_AVAIL);
+			tok.unpin();
+			return;
 		}
 		elist.count += 1;
 		elist.keys[elist.count] = key;
@@ -625,7 +642,7 @@ class DistributedMapImpl {
 
 	inline proc eraseLocal(key : keyType, defaultHash, idx, tok) {
 		tok.pin();
-		var elist = getEList(key, false, defaultHash, idx, tok);
+		var (elist, keyIdx) = getEList(key, false, defaultHash, idx, tok);
 		if (elist == nil) then return;
 		for i in 1..elist.count {
 			if (elist.keys[i] == key) {
@@ -657,23 +674,33 @@ class DistributedMapImpl {
 					when MapAction.insert {
 						var timer1 = new Timer();
 						if PRINT_TIME then timer1.start();
-						var elist = _this.getEList(key, true, defaultHash, idx, tok);
+						var (elist, keyIdx) = _this.getEList(key, true, defaultHash, idx, tok);
 						if PRINT_TIME {
 							var tm = timer1.elapsed();
 							writeln(tm, " getEList");
 						}
-						var done = false;
-						for i in 1..elist.count {
-							if (elist.keys[i] == key) {
-								elist.lock.write(E_AVAIL);
-								done = true;
-								break;
+						if (keyIdx == -1) {
+							var done = false;
+							for i in 1..elist.count {
+								if (elist.keys[i] == key) {
+									elist.lock.write(E_AVAIL);
+									done = true;
+									break;
+								}
 							}
-						}
-						if (!done) {
+							if (!done) {
+								elist.count += 1;
+								elist.keys[elist.count] = key;
+								elist.values[elist.count] = val;
+								elist.lock.write(E_AVAIL);
+							}
+						} else if (keyIdx == 1) {
+							elist.keys[keyIdx] = key;
+							elist.values[keyIdx] = val;
 							elist.count += 1;
-							elist.keys[elist.count] = key;
-							elist.values[elist.count] = val;
+							elist.lock.write(E_AVAIL);
+						} else {
+							elist.values[keyIdx] = val;
 							elist.lock.write(E_AVAIL);
 						}
 						if PRINT_TIME {
@@ -683,7 +710,7 @@ class DistributedMapImpl {
 					}
 
 					when MapAction.find {
-						var elist = _this.getEList(key, false, defaultHash, idx, tok);
+						var (elist, keyIdx) = _this.getEList(key, false, defaultHash, idx, tok);
 						var success = false;
 						var retVal : _this.valType?;
 						if (elist != nil) {
@@ -713,7 +740,7 @@ class DistributedMapImpl {
 						if PRINT_TIME {
 							timer1.start();
 						}
-						var elist = _this.getEList(key, false, defaultHash, idx, tok);
+						var (elist, keyIdx) = _this.getEList(key, false, defaultHash, idx, tok);
 						if PRINT_TIME {
 							var tm = timer1.elapsed();
 							writeln(tm, " getEList");
