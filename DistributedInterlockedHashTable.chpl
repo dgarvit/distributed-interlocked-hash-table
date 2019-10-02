@@ -20,8 +20,25 @@ config const DFS = false;
 config const VDEBUG = false;
 config const PRINT_TIME = false;
 config const GETELIST_COUNT = false;
-config const ROOT_BUCKETS_SIZE = DEFAULT_NUM_BUCKETS * Locales.size;
+config const ROOT_BUCKETS_SIZE = DEFAULT_NUM_BUCKETS * numLocales;
 config const BUFFER_SIZE = 8 * 1024;
+param ASSERT = false;
+param HASH_SHIFT = (64 - 8);
+
+// param BUCKET_NUM_ELEMS = 8;
+// param DEFAULT_NUM_BUCKETS = 1024;
+// param MULTIPLIER_NUM_BUCKETS : real = 2;
+// param DEPTH = 2;
+// param EMAX = 4;
+// param FLUSHLOCAL = true;
+// param VERBOSE = false;
+// param DFS = false;
+// param VDEBUG = false;
+// param PRINT_TIME = false;
+// param GETELIST_COUNT = false;
+// param ROOT_BUCKETS_SIZE = DEFAULT_NUM_BUCKETS * 64;
+// config const BUFFER_SIZE = 8 * 1024;
+// param ASSERT = false;
 
 // Note: Once this becomes distributed, we have to make it per-locale
 // var seedRNG = new owned RandomStream(uint(64), parSafe=true);
@@ -150,6 +167,7 @@ class Bucket : Base {
 	var count : uint;
 	var keys : BUCKET_NUM_ELEMS * keyType;
 	var values : BUCKET_NUM_ELEMS * valType;
+	var topHash : BUCKET_NUM_ELEMS * uint(8);
 
 	proc init(type keyType, type valType) {
 		super.init(keyType, valType);
@@ -179,7 +197,7 @@ class Bucket : Base {
 }
 
 class Buckets : Base {
-	var seed : uint(64);
+	const seed : uint(64);
 	var bucketsDom = {0..-1};
 	var buckets : [bucketsDom] AtomicObject(unmanaged Base(keyType?, valType?)?, hasABASupport=false, hasGlobalSupport=true);
 	// var buckets : [0..(size-1)] AtomicObject(unmanaged Base(keyType?, valType?)?, hasABASupport=false, hasGlobalSupport=true);
@@ -277,14 +295,14 @@ record DistributedMap {
 class DistributedMapImpl {
 	type keyType;
 	type valType;
-	type msgType = (MapAction, keyType, valType?, unmanaged MapFuture(valType)?);
+	type msgType = (MapAction, keyType, valType?, uint(64), int, unmanaged MapFuture(valType)?);
 	var pid : int;
-	var rootSeed : uint(64); // Same across all nodes...
 	var rootArray : unmanaged RootBucketsArray(keyType, valType);
 	var rootBuckets = _newArray(rootArray.A._value);
 	var aggregator = UninitializedAggregator(msgType);
 	var manager : EpochManager;
 	var seedRNG = new owned RandomStream(uint(64), parSafe=true);
+	const rootSeed : uint(64); // Same across all nodes...
 
 	proc init(type keyType, type valType) {
 		this.keyType = keyType;
@@ -292,11 +310,11 @@ class DistributedMapImpl {
 		this.rootArray = new unmanaged RootBucketsArray(keyType, valType);
 		this.aggregator = new Aggregator((msgType), BUFFER_SIZE);
 		this.manager = new EpochManager(); // This will be shared across all instances...
+		this.rootSeed = seedRNG.getNext();
 		// TODO: We need to add a `UninitializedEpochManager` helper function that will not initialize the `record`
 		// since records are initialzied by default in Chapel, regardless of what you want, with no way to avoid this.
 
 		this.complete();
-		this.rootSeed = seedRNG.getNext();
 		this.pid = _newPrivatizedClass(this);
 	}
 
@@ -304,45 +322,43 @@ class DistributedMapImpl {
 		this.keyType = other.keyType;
 		this.valType = other.valType;
 		this.pid = privatizedData[1];
-		this.rootSeed = privatizedData[4];
 		this.rootArray = privatizedData[3];
 		this.aggregator = privatizedData[5];
 		this.manager = privatizedData[2];
+		this.rootSeed = privatizedData[4];
 	}
 
-	proc getToken() : owned DistTokenWrapper {
+	inline proc getToken() : owned DistTokenWrapper {
 		return manager.register();
 	}
 
-	proc rootHash(key : keyType) {
+	inline proc rootHash(key : keyType) {
 		return _gen_key(chpl__defaultHashCombine(chpl__defaultHash(key), this.rootSeed, 1));
 	}
 
-	proc _rootHash(key) {
+	inline proc _rootHash(key) {
 		return _gen_key(chpl__defaultHashCombine(key, this.rootSeed, 1));
 	}
 
-	proc getEList(key : keyType, isInsertion : bool, tok) {
-		var rootCount = 0;
+	proc getEList(key : keyType, isInsertion : bool, defaultHash, _idx, tok) {
 		var curr : unmanaged Buckets(keyType, valType)? = nil;
-		const defaultHash = chpl__defaultHash(key);
-		var idx = (this._rootHash(defaultHash) % (this.rootBuckets.size):uint):int;
+		// const defaultHash = chpl__defaultHash(key);
+		// var idx = (this._rootHash(defaultHash) % (this.rootBuckets.size):uint):int;
+		var idx = _idx;
 		var shouldYield = false;
 		while (true) {
-			rootCount += 1;
 			var next = rootBuckets[idx].read();
 			// if (next != nil) {
 			// 	var lock = next.lock.read();
 			// 	if (lock == E_AVAIL || lock == E_LOCK) {
 			// 		var elist = next : unmanaged Bucket(keyType, valType);
-			// 		assert(elist.count <= 8, elist);
+			// 		if ASSERT then assert(elist.count <= 8, elist);
 			// 	}
 			// }
 			if (next == nil) {
 				// If we're not inserting something, I.E we are removing
 				// or retreiving, we are done.
 				if !isInsertion {
-					if GETELIST_COUNT then writeln(rootCount, " ", rootCount, " ", 0);
 					return nil;
 				}
 
@@ -352,7 +368,6 @@ class DistributedMapImpl {
 
 				// We set our Bucket, we also own it so return it
 				if (this.rootBuckets[idx].compareAndSwap(nil, newList)) {
-					if GETELIST_COUNT then writeln(rootCount, " ", rootCount, " ", 0);
 					return newList;
 				} else {
 					// Someone else set their bucket, reload.
@@ -368,20 +383,17 @@ class DistributedMapImpl {
 				if (next.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
 					// Non-insertions don't care.
 					if !isInsertion {
-						if GETELIST_COUNT then writeln(rootCount, " ", rootCount, " ", 0);
 						return next : unmanaged Bucket(keyType, valType);
 					}
 					// Insertions cannot have a full bucket...
 					// If it is not full return it
 					var bucket = next : unmanaged Bucket(keyType, valType)?;
 					if bucket.count < BUCKET_NUM_ELEMS {
-						if GETELIST_COUNT then writeln(rootCount, " ", rootCount, " ", 0);
 						return bucket;
 					}
 
 					for k in bucket.keys {
 						if k == key {
-							if GETELIST_COUNT then writeln(rootCount, " ", rootCount, " ", 0);
 							return bucket;
 						}
 					}
@@ -416,25 +428,22 @@ class DistributedMapImpl {
 		}
 		shouldYield = false;
 
-		var loopCount = 0;
 
 		idx = (curr._hash(defaultHash) % (curr.buckets.size):uint):int;
 		while (true) {
-			loopCount += 1;
-			assert(curr.buckets.domain.contains(idx), "Bad idx ", idx, " not in domain ", curr.buckets.domain);
+			if ASSERT then assert(curr.buckets.domain.contains(idx), "Bad idx ", idx, " not in domain ", curr.buckets.domain);
       var next = curr.buckets[idx].read();
 			// if (next != nil) {
 			// 	var lock = next.lock.read();
 			// 	if (lock == E_AVAIL || lock == E_LOCK) {
 			// 		var elist = next : unmanaged Bucket(keyType, valType);
-			// 		assert(elist.count <= 8, elist);
+			// 		if ASSERT then assert(elist.count <= 8, elist);
 			// 	}
 			// }
 			if (next == nil) {
 				// If we're not inserting something, I.E we are removing
 				// or retreiving, we are done.
 				if !isInsertion {
-					if GETELIST_COUNT then writeln(rootCount + loopCount, " ", rootCount, " ", loopCount);
 					return nil;
 				}
 
@@ -445,7 +454,6 @@ class DistributedMapImpl {
 
 				// We set our Bucket, we also own it so return it
 				if (curr.buckets[idx].compareAndSwap(nil, newList)) {
-					if GETELIST_COUNT then writeln(rootCount + loopCount, " ", rootCount, " ", loopCount);
 					return newList;
 				} else {
 					// Someone else set their bucket, reload.
@@ -461,20 +469,17 @@ class DistributedMapImpl {
 				if (next.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
 					// Non-insertions don't care.
 					if !isInsertion {
-						if GETELIST_COUNT then writeln(rootCount + loopCount, " ", rootCount, " ", loopCount);
 						return next : unmanaged Bucket(keyType, valType);
 					}
 					// Insertions cannot have a full bucket...
 					// If it is not full return it
 					var bucket = next : unmanaged Bucket(keyType, valType)?;
 					if bucket.count < BUCKET_NUM_ELEMS {
-						if GETELIST_COUNT then writeln(rootCount + loopCount, " ", rootCount, " ", loopCount);
 						return bucket;
 					}
 
 					for k in bucket.keys {
 						if k == key {
-							if GETELIST_COUNT then writeln(rootCount + loopCount, " ", rootCount, " ", loopCount);
 							return bucket;
 						}
 					}
@@ -538,52 +543,54 @@ class DistributedMapImpl {
 	}
 
 	proc insertAsync(key : keyType, val : valType, tok) {
-		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
+		const defaultHash = chpl__defaultHash(key);
+		const idx = (this._rootHash(defaultHash) % (this.rootBuckets.size):uint):int;
 		if here.id == rootBuckets[idx].locale.id {
-			insertLocal(key, val, tok);
+			insertLocal(key, val, defaultHash, idx, tok);
 			return;
 		}
 		var future : unmanaged MapFuture(valType)?;
-		var buff = aggregator.aggregate((MapAction.insert, key, val, future), rootBuckets[idx].locale);
+		var buff = aggregator.aggregate((MapAction.insert, key, val, defaultHash, idx, future), rootBuckets[idx].locale);
 		if buff != nil {
 			begin emptyBuffer(buff, rootBuckets[idx].locale);
 		}
 	}
 
-	proc findAsync(key : keyType, tok) {
-		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
-		var future = new unmanaged MapFuture(valType);
-		//if here.id == rootBuckets[idx].locale.id {
-		//	var (found, val) = findLocal(key, tok);
-		//	if found then future.success(val);
-		//	else future.fail();
-		//	return future;
-		//}
-		var val : this.valType?;
-		var buff = aggregator.aggregate((MapAction.find, key, val, future), rootBuckets[idx].locale);
-		if buff != nil {
-			begin emptyBuffer(buff, rootBuckets[idx].locale);
-		}
-		return future;
-	}
+	// proc findAsync(key : keyType, tok) {
+	// 	var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
+	// 	var future = new unmanaged MapFuture(valType);
+	// 	//if here.id == rootBuckets[idx].locale.id {
+	// 	//	var (found, val) = findLocal(key, tok);
+	// 	//	if found then future.success(val);
+	// 	//	else future.fail();
+	// 	//	return future;
+	// 	//}
+	// 	var val : this.valType?;
+	// 	var buff = aggregator.aggregate((MapAction.find, key, val, future), rootBuckets[idx].locale);
+	// 	if buff != nil {
+	// 		begin emptyBuffer(buff, rootBuckets[idx].locale);
+	// 	}
+	// 	return future;
+	// }
 
 	proc eraseAsync(key : keyType, tok) {
-		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
+		const defaultHash = chpl__defaultHash(key);
+		const idx = (this._rootHash(defaultHash) % (this.rootBuckets.size):uint):int;
 		if here.id == rootBuckets[idx].locale.id {
-			eraseLocal(key, tok);
+			eraseLocal(key, defaultHash, idx, tok);
 			return;
 		}
 		var val : this.valType?;
 		var future : unmanaged MapFuture(valType)?;
-		var buff = aggregator.aggregate((MapAction.erase, key, val, future), rootBuckets[idx].locale);
+		var buff = aggregator.aggregate((MapAction.erase, key, val, defaultHash, idx, future), rootBuckets[idx].locale);
 		if buff != nil {
 			begin emptyBuffer(buff, rootBuckets[idx].locale);
 		}
 	}
 
-	inline proc insertLocal(key : keyType, val : valType, tok) {
+	inline proc insertLocal(key : keyType, val : valType, defaultHash, idx, tok) {
 		tok.pin();
-		var elist = getEList(key, true, tok);
+		var elist = getEList(key, true, defaultHash, idx, tok);
 		for i in 1..elist.count {
 			if (elist.keys[i] == key) {
 				elist.lock.write(E_AVAIL);
@@ -598,27 +605,27 @@ class DistributedMapImpl {
 		tok.unpin();
 	}
 
-	proc findLocal(key : keyType, tok) {
-		tok.pin();
-		var elist = getEList(key, false, tok);
-		var res : valType?;
-		if (elist == nil) then return (false, res);
-		var found = false;
-		for i in 1..elist.count {
-			if (elist.keys[i] == key) {
-				res = elist.values[i];
-				found = true;
-				break;
-			}
-		}
-		elist.lock.write(E_AVAIL);
-		tok.unpin();
-		return (found, res);
-	}
+	// proc findLocal(key : keyType, tok) {
+	// 	tok.pin();
+	// 	var elist = getEList(key, false, tok);
+	// 	var res : valType?;
+	// 	if (elist == nil) then return (false, res);
+	// 	var found = false;
+	// 	for i in 1..elist.count {
+	// 		if (elist.keys[i] == key) {
+	// 			res = elist.values[i];
+	// 			found = true;
+	// 			break;
+	// 		}
+	// 	}
+	// 	elist.lock.write(E_AVAIL);
+	// 	tok.unpin();
+	// 	return (found, res);
+	// }
 
-	inline proc eraseLocal(key : keyType, tok) {
+	inline proc eraseLocal(key : keyType, defaultHash, idx, tok) {
 		tok.pin();
-		var elist = getEList(key, false, tok);
+		var elist = getEList(key, false, defaultHash, idx, tok);
 		if (elist == nil) then return;
 		for i in 1..elist.count {
 			if (elist.keys[i] == key) {
@@ -644,13 +651,13 @@ class DistributedMapImpl {
 			var buff = buffer.getArray();
 			buffer.done();
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
-			forall (action, key, val, future) in buff with (var tok = _this.getToken()) {
+			forall (action, key, val, defaultHash, idx, future) in buff with (var tok = _this.getToken()) {
 				tok.pin();
 				select action {
 					when MapAction.insert {
 						var timer1 = new Timer();
 						if PRINT_TIME then timer1.start();
-						var elist = _this.getEList(key, true, tok);
+						var elist = _this.getEList(key, true, defaultHash, idx, tok);
 						if PRINT_TIME {
 							var tm = timer1.elapsed();
 							writeln(tm, " getEList");
@@ -676,11 +683,11 @@ class DistributedMapImpl {
 					}
 
 					when MapAction.find {
-						var elist = _this.getEList(key, false, tok);
+						var elist = _this.getEList(key, false, defaultHash, idx, tok);
 						var success = false;
 						var retVal : _this.valType?;
 						if (elist != nil) {
-                          assert(elist.count <= 8, elist);
+                          if ASSERT then assert(elist.count <= 8, elist);
 							for i in 1..elist.count {
 								if (elist.keys[i] == key) {
 									retVal = elist.values[i];
@@ -689,7 +696,7 @@ class DistributedMapImpl {
 								}
 							}
 							elist.lock.write(E_AVAIL);
-                            assert(future != nil);
+                            if ASSERT then assert(future != nil);
 							if success {
 								future.found = true; // call this using `on`?
 								future.val = retVal;
@@ -706,13 +713,13 @@ class DistributedMapImpl {
 						if PRINT_TIME {
 							timer1.start();
 						}
-						var elist = _this.getEList(key, false, tok);
+						var elist = _this.getEList(key, false, defaultHash, idx, tok);
 						if PRINT_TIME {
 							var tm = timer1.elapsed();
 							writeln(tm, " getEList");
 						}
 						if (elist != nil) {
-                          assert(elist.count <= 8, elist);
+                          if ASSERT then assert(elist.count <= 8, elist);
 							for i in 1..elist.count {
 								if (elist.keys[i] == key) {
 									elist.keys[i] = elist.keys[elist.count];
@@ -948,7 +955,7 @@ proc randomAsyncOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 	var map = new DistributedMap(int, int);
 	// var tok = map.getToken();
 	// tok.pin();
-	map.insert(1..65536, 0);
+	// map.insert(1..65536, 0);
 	// tok.unpin();
 	if VDEBUG then startVdebug("DIHT");
 	timer.start();
@@ -1023,8 +1030,8 @@ proc main() {
 	// 	for i in 0..#map.rootBuckets.size {
 	// 		var x = map.rootBuckets[i].locale.id;
 	// 		var y = map.rootBuckets[i].read().locale.id;
-	// 		assert(a[i] == x);
-	// 		assert(b[i] == y);
+	// 		if ASSERT then assert(a[i] == x);
+	// 		if ASSERT then assert(b[i] == y);
 	// 	}
 	// }
 	// diagnosticstest();
@@ -1036,6 +1043,6 @@ proc main() {
 	// 	bucket.write(new unmanaged Bucket(int, int));
 	// }
 	// coforall loc in Locales do on loc {
-	// 	assert(&& reduce (map.rootBuckets.read() != nil), here, " has a nil bucket!");
+	// 	if ASSERT then assert(&& reduce (map.rootBuckets.read() != nil), here, " has a nil bucket!");
 	// }
 }
