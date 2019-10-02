@@ -24,6 +24,7 @@ config const ROOT_BUCKETS_SIZE = DEFAULT_NUM_BUCKETS * numLocales;
 config const BUFFER_SIZE = 8 * 1024;
 param ASSERT = false;
 param HASH_SHIFT = (64 - 8);
+const EMPTY = 0 : uint(8);
 
 // param BUCKET_NUM_ELEMS = 8;
 // param DEFAULT_NUM_BUCKETS = 1024;
@@ -394,15 +395,20 @@ class DistributedMapImpl {
 						return (bucket, -1);
 					}
 
+					var topHash = (defaultHash >> HASH_SHIFT):uint(8);
+					if (topHash == 0) then topHash = 1;
+
 					for i in 1..BUCKET_NUM_ELEMS {
-						if bucket.keys[i] == key {
-							return (bucket, i);
+						if topHash == bucket.topHash[i] {
+							if bucket.keys[i] == key {
+								return (bucket, i);
+							}
 						}
 					}
 
 					// Rehash into new Buckets
 					var newBuckets = new unmanaged Buckets(keyType, valType, seedRNG.getNext());
-					for (k,v) in zip(bucket.keys, bucket.values) {
+					for (k,v,t) in zip(bucket.keys, bucket.values, bucket.topHash) {
 						var idx = (newBuckets.hash(k) % newBuckets.buckets.size:uint):int;
 						if newBuckets.buckets[idx].read() == nil {
 						  var newBucket = new unmanaged Bucket(keyType, valType);
@@ -413,6 +419,7 @@ class DistributedMapImpl {
 						buck.count += 1;
 						buck.keys[buck.count] = k;
 						buck.values[buck.count] = v;
+						buck.topHash[buck.count] = t;
 					}
 
 					next.lock.write(GARBAGE);
@@ -488,7 +495,7 @@ class DistributedMapImpl {
 
 					// Rehash into new Buckets
 					var newBuckets = new unmanaged Buckets(keyType, valType, seedRNG.getNext(), curr.buckets.size);
-					for (k,v) in zip(bucket.keys, bucket.values) {
+					for (k,v,t) in zip(bucket.keys, bucket.values, bucket.topHash) {
 						var idx = (newBuckets.hash(k) % newBuckets.buckets.size:uint):int;
 						if newBuckets.buckets[idx].read() == nil {
                           var newBucket = new unmanaged Bucket(keyType, valType);
@@ -499,10 +506,11 @@ class DistributedMapImpl {
 						buck.count += 1;
 						buck.keys[buck.count] = k;
 						buck.values[buck.count] = v;
+						buck.topHash[buck.count] = t;
 					}
 
 					next.lock.write(GARBAGE);
-					tok.deferDelete(next); // tok could be from another locale... Overhead?
+					// tok.deferDelete(next); // tok could be from another locale... Overhead?
 					curr.buckets[idx].write(newBuckets: unmanaged Base(keyType, valType));
 					curr = newBuckets;
 					idx = (curr._hash(defaultHash) % (curr.buckets.size):uint):int;
@@ -594,17 +602,34 @@ class DistributedMapImpl {
 		tok.pin();
 		var (elist, keyIdx) = getEList(key, true, defaultHash, idx, tok);
 		if (keyIdx == -1) {
-			for i in 1..elist.count {
-				if (elist.keys[i] == key) {
-					elist.values[i] = val;
-					elist.lock.write(E_AVAIL);
-					tok.unpin();
-					return;
+			var topHash = (defaultHash >> HASH_SHIFT):uint(8);
+			if (topHash == 0) then topHash = 1;
+			var firstPos = -1;
+			for i in 1..BUCKET_NUM_ELEMS {
+				if topHash == EMPTY {
+					if firstPos == -1 then firstPos = i;
+				}
+				else if (elist.topHash[i] == topHash) {
+					if (elist.keys[i] == key) {
+						elist.values[i] = val;
+						elist.lock.write(E_AVAIL);
+						tok.unpin();
+						return;
+					}
 				}
 			}
+			elist.count += 1;
+			elist.keys[firstPos] = key;
+			elist.values[firstPos] = val;
+			elist.topHash[firstPos] = topHash;
+			elist.lock.write(E_AVAIL);
+			tok.unpin();
 		} else if (keyIdx == 1) {
+			var topHash = (defaultHash >> HASH_SHIFT):uint(8);
+			if (topHash == 0) then topHash = 1;
 			elist.keys[keyIdx] = key;
 			elist.values[keyIdx] = val;
+			elist.topHash[keyIdx] = topHash;
 			elist.count += 1;
 			elist.lock.write(E_AVAIL);
 			tok.unpin();
@@ -615,11 +640,6 @@ class DistributedMapImpl {
 			tok.unpin();
 			return;
 		}
-		elist.count += 1;
-		elist.keys[elist.count] = key;
-		elist.values[elist.count] = val;
-		elist.lock.write(E_AVAIL);
-		tok.unpin();
 	}
 
 	// proc findLocal(key : keyType, tok) {
@@ -644,12 +664,17 @@ class DistributedMapImpl {
 		tok.pin();
 		var (elist, keyIdx) = getEList(key, false, defaultHash, idx, tok);
 		if (elist == nil) then return;
-		for i in 1..elist.count {
-			if (elist.keys[i] == key) {
-				elist.keys[i] = elist.keys[elist.count];
-				elist.values[i] = elist.values[elist.count];
-				elist.count -= 1;
-				break;
+		var topHash = (defaultHash >> HASH_SHIFT):uint(8);
+		if (topHash == 0) then topHash = 1;
+		for i in 1..BUCKET_NUM_ELEMS {
+			if (elist.topHash[i] == topHash) {
+				if (elist.keys[i] == key) {
+					// elist.keys[i] = elist.keys[elist.count];
+					// elist.values[i] = elist.values[elist.count];
+					elist.topHash[i] = EMPTY;
+					elist.count -= 1;
+					break;
+				}
 			}
 		}
 
