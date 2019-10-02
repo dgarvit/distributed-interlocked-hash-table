@@ -706,22 +706,35 @@ class DistributedMapImpl {
 						}
 						if (keyIdx == -1) {
 							var done = false;
-							for i in 1..elist.count {
-								if (elist.keys[i] == key) {
-									elist.lock.write(E_AVAIL);
-									done = true;
-									break;
+							var topHash = (defaultHash >> HASH_SHIFT):uint(8);
+							if (topHash == 0) then topHash = 1;
+							var firstPos = -1;
+							for i in 1..BUCKET_NUM_ELEMS {
+								if topHash == EMPTY {
+									if firstPos == -1 then firstPos = i;
+								}
+								else if (elist.topHash[i] == topHash) {
+									if (elist.keys[i] == key) {
+										elist.values[i] = val;
+										elist.lock.write(E_AVAIL);
+										done = true;
+										break;
+									}
 								}
 							}
 							if (!done) {
 								elist.count += 1;
-								elist.keys[elist.count] = key;
-								elist.values[elist.count] = val;
+								elist.keys[firstPos] = key;
+								elist.values[firstPos] = val;
+								elist.topHash[firstPos] = topHash;
 								elist.lock.write(E_AVAIL);
 							}
 						} else if (keyIdx == 1) {
+							var topHash = (defaultHash >> HASH_SHIFT):uint(8);
+							if (topHash == 0) then topHash = 1;
 							elist.keys[keyIdx] = key;
 							elist.values[keyIdx] = val;
+							elist.topHash[keyIdx] = topHash;
 							elist.count += 1;
 							elist.lock.write(E_AVAIL);
 						} else {
@@ -772,12 +785,17 @@ class DistributedMapImpl {
 						}
 						if (elist != nil) {
                           if ASSERT then assert(elist.count <= 8, elist);
-							for i in 1..elist.count {
-								if (elist.keys[i] == key) {
-									elist.keys[i] = elist.keys[elist.count];
-									elist.values[i] = elist.values[elist.count];
-									elist.count -= 1;
-									break;
+							var topHash = (defaultHash >> HASH_SHIFT):uint(8);
+							if (topHash == 0) then topHash = 1;
+							for i in 1..BUCKET_NUM_ELEMS {
+								if (elist.topHash[i] == topHash) {
+									if (elist.keys[i] == key) {
+										// elist.keys[i] = elist.keys[elist.count];
+										// elist.values[i] = elist.values[elist.count];
+										elist.topHash[i] = EMPTY;
+										elist.count -= 1;
+										break;
+									}
 								}
 							}
 							elist.lock.write(E_AVAIL);
