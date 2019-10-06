@@ -396,7 +396,7 @@ class DistributedMapImpl {
 					}
 
 					var topHash = (defaultHash >> HASH_SHIFT):uint(8);
-					if (topHash == 0) then topHash = 1;
+					if (topHash == EMPTY) then topHash = 1;
 
 					for i in 1..BUCKET_NUM_ELEMS {
 						if topHash == bucket.topHash[i] {
@@ -487,9 +487,14 @@ class DistributedMapImpl {
 						return (bucket, -1);
 					}
 
+					var topHash = (defaultHash >> HASH_SHIFT):uint(8);
+					if (topHash == EMPTY) then topHash = 1;
+
 					for i in 1..BUCKET_NUM_ELEMS {
-						if bucket.keys[i] == key {
-							return (bucket, i);
+						if topHash == bucket.topHash[i] {
+							if bucket.keys[i] == key {
+								return (bucket, i);
+							}
 						}
 					}
 
@@ -600,15 +605,15 @@ class DistributedMapImpl {
 		}
 	}
 
-	inline proc insertLocal(key : keyType, val : valType, defaultHash, idx, tok) {
+	proc insertLocal(key : keyType, val : valType, defaultHash, idx, tok) {
 		tok.pin();
 		var (elist, keyIdx) = getEList(key, true, defaultHash, idx, tok);
 		if (keyIdx == -1) {
 			var topHash = (defaultHash >> HASH_SHIFT):uint(8);
-			if (topHash == 0) then topHash = 1;
+			if (topHash == EMPTY) then topHash = 1;
 			var firstPos = -1;
 			for i in 1..BUCKET_NUM_ELEMS {
-				if topHash == EMPTY {
+				if elist.topHash[i] == EMPTY {
 					if firstPos == -1 then firstPos = i;
 				}
 				else if (elist.topHash[i] == topHash) {
@@ -628,19 +633,17 @@ class DistributedMapImpl {
 			tok.unpin();
 		} else if (keyIdx == 1) {
 			var topHash = (defaultHash >> HASH_SHIFT):uint(8);
-			if (topHash == 0) then topHash = 1;
+			if (topHash == EMPTY) then topHash = 1;
 			elist.keys[keyIdx] = key;
 			elist.values[keyIdx] = val;
 			elist.topHash[keyIdx] = topHash;
 			elist.count += 1;
 			elist.lock.write(E_AVAIL);
 			tok.unpin();
-			return;
 		} else {
 			elist.values[keyIdx] = val;
 			elist.lock.write(E_AVAIL);
 			tok.unpin();
-			return;
 		}
 	}
 
@@ -651,12 +654,10 @@ class DistributedMapImpl {
 		var found = false;
 		if (elist != nil) {
 			var topHash = (defaultHash >> HASH_SHIFT):uint(8);
-			if (topHash == 0) then topHash = 1;
+			if (topHash == EMPTY) then topHash = 1;
 			for i in 1..BUCKET_NUM_ELEMS {
 				if (elist.topHash[i] == topHash) {
 					if (elist.keys[i] == key) {
-						// elist.keys[i] = elist.keys[elist.count];
-						// elist.values[i] = elist.values[elist.count];
 						found = true;
 						res = elist.values[i];
 						break;
@@ -672,22 +673,20 @@ class DistributedMapImpl {
 	inline proc eraseLocal(key : keyType, defaultHash, idx, tok) {
 		tok.pin();
 		var (elist, keyIdx) = getEList(key, false, defaultHash, idx, tok);
-		if (elist == nil) then return;
-		var topHash = (defaultHash >> HASH_SHIFT):uint(8);
-		if (topHash == 0) then topHash = 1;
-		for i in 1..BUCKET_NUM_ELEMS {
-			if (elist.topHash[i] == topHash) {
-				if (elist.keys[i] == key) {
-					// elist.keys[i] = elist.keys[elist.count];
-					// elist.values[i] = elist.values[elist.count];
-					elist.topHash[i] = EMPTY;
-					elist.count -= 1;
-					break;
+		if (elist != nil) {
+			var topHash = (defaultHash >> HASH_SHIFT):uint(8);
+			if (topHash == EMPTY) then topHash = 1;
+			for i in 1..BUCKET_NUM_ELEMS {
+				if (elist.topHash[i] == topHash) {
+					if (elist.keys[i] == key) {
+						elist.topHash[i] = EMPTY;
+						elist.count -= 1;
+						break;
+					}
 				}
 			}
+			elist.lock.write(E_AVAIL);
 		}
-
-		elist.lock.write(E_AVAIL);
 		tok.unpin();
 	}
 
@@ -716,10 +715,10 @@ class DistributedMapImpl {
 						if (keyIdx == -1) {
 							var done = false;
 							var topHash = (defaultHash >> HASH_SHIFT):uint(8);
-							if (topHash == 0) then topHash = 1;
+							if (topHash == EMPTY) then topHash = 1;
 							var firstPos = -1;
 							for i in 1..BUCKET_NUM_ELEMS {
-								if topHash == EMPTY {
+								if elist.topHash[i] == EMPTY {
 									if firstPos == -1 then firstPos = i;
 								}
 								else if (elist.topHash[i] == topHash) {
@@ -740,7 +739,7 @@ class DistributedMapImpl {
 							}
 						} else if (keyIdx == 1) {
 							var topHash = (defaultHash >> HASH_SHIFT):uint(8);
-							if (topHash == 0) then topHash = 1;
+							if (topHash == EMPTY) then topHash = 1;
 							elist.keys[keyIdx] = key;
 							elist.values[keyIdx] = val;
 							elist.topHash[keyIdx] = topHash;
@@ -763,12 +762,11 @@ class DistributedMapImpl {
 						if (elist != nil) {
                           if ASSERT then assert(elist.count <= 8, elist);
 							var topHash = (defaultHash >> HASH_SHIFT):uint(8);
-							if (topHash == 0) then topHash = 1;
+							if (topHash == EMPTY) then topHash = 1;
 							for i in 1..BUCKET_NUM_ELEMS {
 								if (elist.topHash[i] == topHash) {
 									if (elist.keys[i] == key) {
-										// elist.keys[i] = elist.keys[elist.count];
-										// elist.values[i] = elist.values[elist.count];
+										success = true;
 										retVal = elist.values[i];
 										break;
 									}
@@ -779,13 +777,13 @@ class DistributedMapImpl {
 						}
 						if success {
 							// future.found = true; // call this using `on`?
-							future.val = retVal;
+							// future.val = retVal;
 							// future.complete = true;
 							// future.success(retVal);
 						}
 						else {
 							// future.complete.write(true);
-							future.fail();
+							// future.fail();
 						}
 					}
 
@@ -802,7 +800,7 @@ class DistributedMapImpl {
 						if (elist != nil) {
                           if ASSERT then assert(elist.count <= 8, elist);
 							var topHash = (defaultHash >> HASH_SHIFT):uint(8);
-							if (topHash == 0) then topHash = 1;
+							if (topHash == EMPTY) then topHash = 1;
 							for i in 1..BUCKET_NUM_ELEMS {
 								if (elist.topHash[i] == topHash) {
 									if (elist.keys[i] == key) {
@@ -1040,7 +1038,8 @@ proc randomAsyncOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 	var timer = new Timer();
 	var map = new DistributedMap(int, int);
 	var tok = map.getToken();
-	map.insertAsync(1..65536, 0, tok);
+	for i in 0..maxLimit:int do
+		map.insertAsync(i, i+1, tok);
 	map.flushLocalBuffers();
 	if VDEBUG then startVdebug("DIHT");
 	timer.start();
