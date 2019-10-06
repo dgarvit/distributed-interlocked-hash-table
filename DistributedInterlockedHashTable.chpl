@@ -250,7 +250,7 @@ class RootBucketsArray {
 
 class MapFuture {
 	type valType;
-	var complete = false;
+	var complete : chpl__processorAtomicType(bool);
 	var found = false;
 	var val : valType?;
 
@@ -261,12 +261,12 @@ class MapFuture {
 	proc success (val : valType) {
 		found = true;
 		this.val = val;
-		complete = true;
+		complete.write(true);
 	}
 
 	proc fail () {
 		found = false;
-		complete = true;
+		complete.write(true);
 	}
 }
 
@@ -423,7 +423,7 @@ class DistributedMapImpl {
 					}
 
 					next.lock.write(GARBAGE);
-					// tok.deferDelete(next);
+					tok.deferDelete(next);
 					rootBuckets[idx].write(newBuckets: unmanaged Base(keyType, valType));
 					curr = newBuckets;
 					break;
@@ -510,7 +510,7 @@ class DistributedMapImpl {
 					}
 
 					next.lock.write(GARBAGE);
-					// tok.deferDelete(next); // tok could be from another locale... Overhead?
+					tok.deferDelete(next); // tok could be from another locale... Overhead?
 					curr.buckets[idx].write(newBuckets: unmanaged Base(keyType, valType));
 					curr = newBuckets;
 					idx = (curr._hash(defaultHash) % (curr.buckets.size):uint):int;
@@ -566,22 +566,24 @@ class DistributedMapImpl {
 		}
 	}
 
-	// proc findAsync(key : keyType, tok) {
-	// 	var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
-	// 	var future = new unmanaged MapFuture(valType);
-	// 	//if here.id == rootBuckets[idx].locale.id {
-	// 	//	var (found, val) = findLocal(key, tok);
-	// 	//	if found then future.success(val);
-	// 	//	else future.fail();
-	// 	//	return future;
-	// 	//}
-	// 	var val : this.valType?;
-	// 	var buff = aggregator.aggregate((MapAction.find, key, val, future), rootBuckets[idx].locale);
-	// 	if buff != nil {
-	// 		begin emptyBuffer(buff, rootBuckets[idx].locale);
-	// 	}
-	// 	return future;
-	// }
+	proc findAsync(key : keyType, tok) {
+        const defaultHash = chpl__defaultHash(key);
+		const idx = (this._rootHash(defaultHash) % (this.rootBuckets.size):uint):int;
+		var future = new unmanaged MapFuture(valType)?;
+		if here.id == rootBuckets[idx].locale.id {
+			const (found, val) = findLocal(key, defaultHash, idx, tok);
+			if found then future.success(val);
+			else future.fail();
+			// return future;
+		} else {
+			var val : this.valType?;
+			var buff = aggregator.aggregate((MapAction.find, key, val, defaultHash, idx, future), rootBuckets[idx].locale);
+			if buff != nil {
+				begin emptyBuffer(buff, rootBuckets[idx].locale);
+			}
+		}
+		return future;
+	}
 
 	proc eraseAsync(key : keyType, tok) {
 		const defaultHash = chpl__defaultHash(key);
@@ -642,23 +644,30 @@ class DistributedMapImpl {
 		}
 	}
 
-	// proc findLocal(key : keyType, tok) {
-	// 	tok.pin();
-	// 	var elist = getEList(key, false, tok);
-	// 	var res : valType?;
-	// 	if (elist == nil) then return (false, res);
-	// 	var found = false;
-	// 	for i in 1..elist.count {
-	// 		if (elist.keys[i] == key) {
-	// 			res = elist.values[i];
-	// 			found = true;
-	// 			break;
-	// 		}
-	// 	}
-	// 	elist.lock.write(E_AVAIL);
-	// 	tok.unpin();
-	// 	return (found, res);
-	// }
+	inline proc findLocal(key : keyType, defaultHash, idx, tok) {
+		tok.pin();
+		var (elist, keyIdx) = getEList(key, true, defaultHash, idx, tok);
+		var res : valType?;
+		var found = false;
+		if (elist != nil) {
+			var topHash = (defaultHash >> HASH_SHIFT):uint(8);
+			if (topHash == 0) then topHash = 1;
+			for i in 1..BUCKET_NUM_ELEMS {
+				if (elist.topHash[i] == topHash) {
+					if (elist.keys[i] == key) {
+						// elist.keys[i] = elist.keys[elist.count];
+						// elist.values[i] = elist.values[elist.count];
+						found = true;
+						res = elist.values[i];
+						break;
+					}
+				}
+			}
+			elist.lock.write(E_AVAIL);
+		}
+		tok.unpin();
+		return (found, res);
+	}
 
 	inline proc eraseLocal(key : keyType, defaultHash, idx, tok) {
 		tok.pin();
@@ -753,23 +762,30 @@ class DistributedMapImpl {
 						var retVal : _this.valType?;
 						if (elist != nil) {
                           if ASSERT then assert(elist.count <= 8, elist);
-							for i in 1..elist.count {
-								if (elist.keys[i] == key) {
-									retVal = elist.values[i];
-									success = true;
-									break;
+							var topHash = (defaultHash >> HASH_SHIFT):uint(8);
+							if (topHash == 0) then topHash = 1;
+							for i in 1..BUCKET_NUM_ELEMS {
+								if (elist.topHash[i] == topHash) {
+									if (elist.keys[i] == key) {
+										// elist.keys[i] = elist.keys[elist.count];
+										// elist.values[i] = elist.values[elist.count];
+										retVal = elist.values[i];
+										break;
+									}
 								}
 							}
 							elist.lock.write(E_AVAIL);
                             if ASSERT then assert(future != nil);
-							if success {
-								future.found = true; // call this using `on`?
-								future.val = retVal;
-								future.complete = true;
-							}
-							else {
-								future.complete = true;
-							}
+						}
+						if success {
+							// future.found = true; // call this using `on`?
+							future.val = retVal;
+							// future.complete = true;
+							// future.success(retVal);
+						}
+						else {
+							// future.complete.write(true);
+							future.fail();
 						}
 					}
 
@@ -1023,41 +1039,31 @@ proc randomOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 proc randomAsyncOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 	var timer = new Timer();
 	var map = new DistributedMap(int, int);
-	// var tok = map.getToken();
-	// tok.pin();
-	// map.insert(1..65536, 0);
-	// tok.unpin();
+	var tok = map.getToken();
+	map.insertAsync(1..65536, 0, tok);
+	map.flushLocalBuffers();
 	if VDEBUG then startVdebug("DIHT");
 	timer.start();
 	coforall loc in Locales do on loc {
 		const opsperloc = N / Locales.size;
-		// var timer1 = new Timer();
-		// timer1.start();
 		coforall tid in 1..here.maxTaskPar {
 			var rng = new RandomStream(real);
 			var keyRng = new RandomStream(int);
 			const opspertask = opsperloc / here.maxTaskPar;
 			var tok = map.getToken();
 			for i in 1..opspertask {
-				var s = rng.getNext();
+			var s = rng.getNext();
 				var key = keyRng.getNext(0, maxLimit:int);
-				// if s < 0.33 {
-				// 	map.insertAsync(key,i, tok);
-				// } else if s < 0.66 {
-				// 	map.eraseAsync(key, tok);
-				// } else {
-				// 	var tmp = map.findAsync(key, tok);
-				// }
-				if s < 0.5 {
+				if s < 0.1 {
 					map.insertAsync(key,i, tok);
-				} else {
+				} else if s < 0.2 {
 					map.eraseAsync(key, tok);
+				} else {
+					map.findAsync(key, tok);
 				}
 			}
 		}
 		if FLUSHLOCAL then map.flushLocalBuffers();
-		// timer1.stop();
-		// writeln(opsperloc / timer1.elapsed());
 	}
 	if !FLUSHLOCAL then map.flushAllBuffers();
 	timer.stop();
@@ -1080,7 +1086,113 @@ proc diagnosticstest() {
 	stopVerboseComm();
 }
 
+proc insertOpStrongBenchmark (maxLimit : uint = max(uint(16)), tasks = here.maxTaskPar) {
+    var timer = new Timer();
+	var map = new DistributedMap(int, int);
+    timer.start();
+    const opspertask = N / tasks;
+    coforall tid in 1..tasks {
+        var keyRng = new RandomStream(int);
+        var tok = map.getToken();
+		for i in 1..opspertask {
+            var key = keyRng.getNext(0, maxLimit:int);
+            map.insertAsync(key,i,tok);
+        }
+    }
+    timer.stop();
+    const totalOps = opspertask*tasks;
+    writeln(tasks, " tasks, ", ((10**9)*timer.elapsed())/totalOps, " ns/op");
+}
+
+proc eraseOpStrongBenchmark (maxLimit : uint = max(uint(16)), tasks = here.maxTaskPar) {
+    var timer = new Timer();
+	var map = new DistributedMap(int, int);
+    var tok = map.getToken();
+	map.insertAsync(0..65535, 0, tok);
+    timer.start();
+    const opspertask = N / tasks;
+    coforall tid in 1..tasks {
+        var keyRng = new RandomStream(int);
+        var tok = map.getToken();
+		for i in 1..opspertask {
+            var key = keyRng.getNext(0, maxLimit:int);
+            map.eraseAsync(key,tok);
+        }
+    }
+    timer.stop();
+    const totalOps = opspertask*tasks;
+    writeln(tasks, " tasks, ", ((10**9)*timer.elapsed())/totalOps, " ns/op");
+}
+
+proc findOpStrongBenchmark (maxLimit : uint = max(uint(16)), tasks = here.maxTaskPar) {
+    var timer = new Timer();
+	var map = new DistributedMap(int, int);
+    var tok = map.getToken();
+map.insertAsync(0..65535, 0, tok);
+    timer.start();
+    const opspertask = N / tasks;
+    coforall tid in 1..tasks {
+        var keyRng = new RandomStream(int);
+        var tok = map.getToken();
+		for i in 1..opspertask {
+            var key = keyRng.getNext(0, maxLimit:int);
+            map.findAsync(key,tok);
+        }
+    }
+    timer.stop();
+    const totalOps = opspertask*tasks;
+    writeln(tasks, " tasks, ", ((10**9)*timer.elapsed())/totalOps, " ns/op");
+}
+
+proc intSetStrongBenchmark (maxLimit : uint = max(uint(16)), tasks = here.maxTaskPar) {
+    var timer = new Timer();
+	var map = new DistributedMap(int, int);
+    var tok = map.getToken();
+	map.insertAsync(0..65535, 0, tok);
+    timer.start();
+    const opspertask = N / tasks;
+    coforall tid in 1..tasks {
+        var rng = new RandomStream(real);
+        var keyRng = new RandomStream(int);
+		var tok = map.getToken();
+        for i in 1..opspertask {
+            var s = rng.getNext();
+            var key = keyRng.getNext(0, maxLimit:int);
+            if s < 0.8 {
+                map.findAsync(key, tok);
+            } else if s < 0.9 {
+                map.insertAsync(key, i, tok);
+            } else {
+                map.eraseAsync(key, tok);
+            }
+        }
+    }
+    timer.stop();
+    const totalOps = opspertask*tasks;
+    writeln(tasks, " tasks, ", ((10**9)*timer.elapsed())/totalOps, " ns/op");
+}
+
 proc main() {
+	// var tasksArray = [1,2,4,8,16,32,44];
+    // writeln("Insert Benchmark:");
+    // for tasks in tasksArray {
+    //     insertOpStrongBenchmark(max(uint(16)), tasks);
+    // }
+    // writeln();
+    // writeln("Erase Benchmark:");
+    // for tasks in tasksArray {
+    //     eraseOpStrongBenchmark(max(uint(16)), tasks);
+    // }
+    // writeln();
+    // writeln("Find Benchmark:");
+    // for tasks in tasksArray {
+    //     findOpStrongBenchmark(max(uint(16)), tasks);
+    // }
+    // writeln();
+    // writeln("Intset Benchmark:");
+    // for tasks in tasksArray {
+    //     intSetStrongBenchmark(max(uint(16)), tasks);
+    // }
 	if (VERBOSE) then startVerboseComm();
 	randomAsyncOpsStrongBenchmark(max(uint(16)));
 	if (VERBOSE) then stopVerboseComm();
