@@ -537,29 +537,50 @@ class DistributedMapImpl {
 
 	proc insert(key : keyType, val : valType, tok : owned DistTokenWrapper = getToken()) {
 		tok.pin();
-		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
+		const idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
 		var _pid = pid;
 		on rootBuckets[idx].locale {
-			const (_key,_val) = (key, val);
+			const defaultHash = chpl__defaultHash(key);
+			const idx = (this._rootHash(defaultHash) % (this.rootBuckets.size):uint):int;
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
-			// local {
-			  var done = false;
-			  var elist = _this.getEList(key, true, tok);
-			  for i in 1..elist.count {
-				if (elist.keys[i] == _key) {
-				  elist.lock.write(E_AVAIL);
-				  done = true;
-				  break;
+			var (elist, keyIdx) = _this.getEList(key, true, defaultHash, idx, tok);
+			if (keyIdx == -1) {
+				var done = false;
+				var topHash = (defaultHash >> HASH_SHIFT):uint(8);
+				if (topHash == EMPTY) then topHash = 1;
+				var firstPos = -1;
+				for i in 1..BUCKET_NUM_ELEMS {
+					if elist.topHash[i] == EMPTY {
+						if firstPos == -1 then firstPos = i;
+					}
+					else if (elist.topHash[i] == topHash) {
+						if (elist.keys[i] == key) {
+							elist.values[i] = val;
+							elist.lock.write(E_AVAIL);
+							done = true;
+							break;
+						}
+					}
 				}
-			  }
-			  if (!done) {
-				// count.add(1);
+				if (!done) {
+					elist.count += 1;
+					elist.keys[firstPos] = key;
+					elist.values[firstPos] = val;
+					elist.topHash[firstPos] = topHash;
+					elist.lock.write(E_AVAIL);
+				}
+			} else if (keyIdx == 1) {
+				var topHash = (defaultHash >> HASH_SHIFT):uint(8);
+				if (topHash == EMPTY) then topHash = 1;
+				elist.keys[keyIdx] = key;
+				elist.values[keyIdx] = val;
+				elist.topHash[keyIdx] = topHash;
 				elist.count += 1;
-				elist.keys[elist.count] = _key;
-				elist.values[elist.count] = _val;
 				elist.lock.write(E_AVAIL);
-			  }
-			// }
+			} else {
+				elist.values[keyIdx] = val;
+				elist.lock.write(E_AVAIL);
+			}
 		}
 		tok.unpin();
 	}
@@ -888,22 +909,25 @@ class DistributedMapImpl {
 		var resVal : valType?;
 		var _pid = pid;
 		on rootBuckets[idx].locale {
-			const _key = key;
-			var (tmpres, tmpresVal) : (bool, valType);
+			const defaultHash = chpl__defaultHash(key);
+			const idx = (this._rootHash(defaultHash) % (this.rootBuckets.size):uint):int;
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
-			// local {
-			  var elist = _this.getEList(key, false, tok);
-			  if (elist != nil) {
-				for i in 1..elist.count {
-				  if (elist.keys[i] == _key) {
-					(tmpres, tmpresVal) = (true, elist.values[i]);
-					break;
-				  }
+			var (elist, keyIdx) = _this.getEList(key, false, defaultHash, idx, tok);
+			var success = false;
+			var retVal : _this.valType?;
+			if (elist != nil) {
+				var topHash = (defaultHash >> HASH_SHIFT):uint(8);
+				if (topHash == EMPTY) then topHash = 1;
+				for i in 1..BUCKET_NUM_ELEMS {
+					if (elist.topHash[i] == topHash) {
+						if (elist.keys[i] == key) {
+							(res, resVal) = (true, elist.values[i]);
+							break;
+						}
+					}
 				}
 				elist.lock.write(E_AVAIL);
-			  }
-			// }
-			(res, resVal) = (tmpres, tmpresVal);
+			}
 		}
 		tok.unpin();
 		return (res, resVal);
@@ -914,39 +938,33 @@ class DistributedMapImpl {
 		var idx = (this.rootHash(key) % (this.rootBuckets.size):uint):int;
 		var _pid = pid;
 		on rootBuckets[idx].locale {
-			const _key = key;
+			const defaultHash = chpl__defaultHash(key);
+			const idx = (this._rootHash(defaultHash) % (this.rootBuckets.size):uint):int;
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
-			// var (elist, pList, idx) = getPEList(key, false, tok);
-			// local {
-			  var elist = _this.getEList(_key, false, tok);
-			  if (elist != nil) {
-				for i in 1..elist.count {
-				  if (elist.keys[i] == _key) {
-					// count.sub(1);
-					elist.keys[i] = elist.keys[elist.count];
-					elist.values[i] = elist.values[elist.count];
-					elist.count -= 1;
-					break;
-				  }
+			var (elist, keyIdx) = _this.getEList(key, false, defaultHash, idx, tok);
+			if (elist != nil) {
+				var topHash = (defaultHash >> HASH_SHIFT):uint(8);
+				if (topHash == EMPTY) then topHash = 1;
+				for i in 1..BUCKET_NUM_ELEMS {
+					if (elist.topHash[i] == topHash) {
+						if (elist.keys[i] == key) {
+							elist.topHash[i] = EMPTY;
+							elist.count -= 1;
+							break;
+						}
+					}
 				}
 				elist.lock.write(E_AVAIL);
-			  }
-			// }
-
-			// if elist.count == 0 {
-			// 	pList.buckets[idx].write(nil);
-			// 	elist.lock.write(GARBAGE);
-			// 	tok.deferDelete(elist);
-			// } else elist.lock.write(E_AVAIL);
+			}
 		}
 		tok.unpin();
 	}
 
-	proc dsiPrivatize(privatizedData) {
+	inline proc dsiPrivatize(privatizedData) {
 		return new unmanaged DistributedMapImpl(this, privatizedData);
 	}
 
-	proc dsiGetPrivatizeData() {
+	inline proc dsiGetPrivatizeData() {
 		return (pid, manager, rootArray, rootSeed, aggregator);
 	}
 
@@ -1025,31 +1043,28 @@ proc randomOpsBenchmark (maxLimit : uint = max(uint(16))) {
 proc randomOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 	var timer = new Timer();
 	var map = new DistributedMap(int, int);
-	// var tok = map.getToken();
-	// tok.pin();
-	// map.insert(1..(maxLimit:int), 0, tok);
-	// tok.unpin();
+	var tok = map.getToken();
+	for i in 0..maxLimit:int do
+		map.insert(i, i+1, tok);
 	timer.start();
 	coforall loc in Locales do on loc {
 		const opsperloc = N / Locales.size;
 		coforall tid in 1..here.maxTaskPar {
 			var tok = map.getToken();
-			tok.pin();
 			var rng = new RandomStream(real);
 			var keyRng = new RandomStream(int);
 			const opspertask = opsperloc / here.maxTaskPar;
 			for i in 1..opspertask {
 				var s = rng.getNext();
 				var key = keyRng.getNext(0, maxLimit:int);
-				if s < 0.33 {
+				if s < 0.1 {
 					map.insert(key,i,tok);
-				} else if s < 0.66 {
+				} else if s < 0.2 {
 					map.erase(key, tok);
 				} else {
 					map.find(key, tok);
 				}
 			}
-			tok.unpin();
 		}
 	}
 	timer.stop();
