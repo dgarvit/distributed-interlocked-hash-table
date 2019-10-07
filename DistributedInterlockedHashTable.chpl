@@ -248,14 +248,25 @@ class RootBucketsArray {
 	var A : [D] AtomicObject(unmanaged Base(keyType?, valType?)?, hasABASupport=false, hasGlobalSupport=true);
 }
 
+inline proc addr(obj) : uint(64) {
+    return __primitive("cast", uint(64), __primitive("_wide_get_addr", obj));
+  }
+
 class MapFuture {
 	type valType;
 	var complete : chpl__processorAtomicType(bool);
 	var found = false;
 	var val : valType?;
+	const loc : locale;
 
 	proc init (type valType) {
 		this.valType = valType;
+		this.loc = here.locale;
+		assert(this.loc != nil);
+	}
+
+	proc init=(other) {
+		halt("Copy of a class created on ", here);
 	}
 
 	proc success (val : valType) {
@@ -574,7 +585,8 @@ class DistributedMapImpl {
 	proc findAsync(key : keyType, tok) {
         const defaultHash = chpl__defaultHash(key);
 		const idx = (this._rootHash(defaultHash) % (this.rootBuckets.size):uint):int;
-		var future = new unmanaged MapFuture(valType)?;
+		var future = new unmanaged MapFuture(valType);
+		assert(future.loc == future.locale);
 		if here.id == rootBuckets[idx].locale.id {
 			const (found, val) = findLocal(key, defaultHash, idx, tok);
 			if found then future.success(val);
@@ -583,6 +595,7 @@ class DistributedMapImpl {
 		} else {
 			var val : this.valType?;
 			var buff = aggregator.aggregate((MapAction.find, key, val, defaultHash, idx, future), rootBuckets[idx].locale);
+			// writeln((MapAction.find, key, val, defaultHash, idx, future));
 			if buff != nil {
 				begin emptyBuffer(buff, rootBuckets[idx].locale);
 			}
@@ -697,11 +710,22 @@ class DistributedMapImpl {
 		if PRINT_TIME {
 			timer.start();
 		}
+		const initLoc = here.locale;
 		on loc {
 			var buff = buffer.getArray();
+
 			buffer.done();
+			forall x in buff {
+				if (x[1] == MapAction.find) {
+					writeln(x, x[1], x[2], x[3], x[4], x[5]," ", x[6], " ", addr(x[6]));
+				}
+			}
+			/*
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
 			forall (action, key, val, defaultHash, idx, future) in buff with (var tok = _this.getToken()) {
+				if (action == MapAction.find) {
+					writeln(future);
+				}
 				tok.pin();
 				select action {
 					when MapAction.insert {
@@ -775,6 +799,9 @@ class DistributedMapImpl {
 							elist.lock.write(E_AVAIL);
                             if ASSERT then assert(future != nil);
 						}
+						assert(future != nil);
+						// assert(future.locale == initLoc, "here: ", here.locale, ", initLoc: ", initLoc, ", futureLoc: ", future.locale);
+						assert(future.locale == future.loc, "future.loc: ", future.loc, ", future.locale: ", future.locale);
 						if success {
 							// future.found = true; // call this using `on`?
 							// future.val = retVal;
@@ -825,7 +852,7 @@ class DistributedMapImpl {
 		}
 		if PRINT_TIME {
 			timer.stop();
-			writeln(timer.elapsed(), " emptyBuffer");
+			writeln(timer.elapsed(), " emptyBuffer");*/
 		}
 	}
 
@@ -1053,13 +1080,13 @@ proc randomAsyncOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 			for i in 1..opspertask {
 			var s = rng.getNext();
 				var key = keyRng.getNext(0, maxLimit:int);
-				if s < 0.1 {
-					map.insertAsync(key,i, tok);
-				} else if s < 0.2 {
-					map.eraseAsync(key, tok);
-				} else {
+				// if s < 0.1 {
+				// 	map.insertAsync(key,i, tok);
+				// } else if s < 0.2 {
+				// 	map.eraseAsync(key, tok);
+				// } else {
 					map.findAsync(key, tok);
-				}
+				// }
 			}
 		}
 		if FLUSHLOCAL then map.flushLocalBuffers();
