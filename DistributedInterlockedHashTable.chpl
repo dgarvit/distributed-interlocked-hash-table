@@ -185,16 +185,16 @@ class Bucket : Base {
 		if (lock.read() == E_LOCK) then lock.write(E_AVAIL);
 	}
 
-    proc readWriteThis(f) {
-      f <~> "(ElementList) {\n\tcount=%@xu\n\t".format(count);
-      for i in 1..8 {
-        f <~> "keys[%i] = %@xu, values[%i] = %@xu\n\t".format(i, keys[i], i, values[i]);
-      }
-      if parent != nil {
-        f <~> "parent = " <~> parent;
-      }
-      f <~> "\n}";
-    }
+	proc readWriteThis(f) {
+	  f <~> "(ElementList) {\n\tcount=%@xu\n\t".format(count);
+	  for i in 1..8 {
+		f <~> "keys[%i] = %@xu, values[%i] = %@xu\n\t".format(i, keys[i], i, values[i]);
+	  }
+	  if parent != nil {
+		f <~> "parent = " <~> parent;
+	  }
+	  f <~> "\n}";
+	}
 }
 
 class Buckets : Base {
@@ -224,15 +224,15 @@ class Buckets : Base {
 		if (lock.read() == P_LOCK) then lock.write(P_TERM);
 	}
 
-    proc readWriteThis(f) {
-      f <~> "(PointerList) {\n\t";
-      for (idx, bucket) in zip(bucketsDom, buckets) {
-        if bucket.read() != nil {
-          f <~> "[%i]: %@xu\n\t".format(idx, bucket.atomicVar.read()); 
-        }
-      }
-      f <~> "\n}";
-    }
+	proc readWriteThis(f) {
+	  f <~> "(PointerList) {\n\t";
+	  for (idx, bucket) in zip(bucketsDom, buckets) {
+		if bucket.read() != nil {
+		  f <~> "[%i]: %@xu\n\t".format(idx, bucket.atomicVar.read()); 
+		}
+	  }
+	  f <~> "\n}";
+	}
 
 	// proc size return buckets.size;
 }
@@ -249,7 +249,7 @@ class RootBucketsArray {
 }
 
 inline proc addr(obj) : uint(64) {
-    return __primitive("cast", uint(64), __primitive("_wide_get_addr", obj));
+	return __primitive("cast", uint(64), __primitive("_wide_get_addr", obj));
   }
 
 class MapFuture {
@@ -263,10 +263,6 @@ class MapFuture {
 		this.valType = valType;
 		this.loc = here.locale;
 		assert(this.loc != nil);
-	}
-
-	proc init=(other) {
-		halt("Copy of a class created on ", here);
 	}
 
 	proc success (val : valType) {
@@ -423,9 +419,9 @@ class DistributedMapImpl {
 						var idx = (newBuckets.hash(k) % newBuckets.buckets.size:uint):int;
 						if newBuckets.buckets[idx].read() == nil {
 						  var newBucket = new unmanaged Bucket(keyType, valType);
-                          newBucket.parent = newBuckets;
-                          newBuckets.buckets[idx].write(newBucket);
-                        }
+						  newBucket.parent = newBuckets;
+						  newBuckets.buckets[idx].write(newBucket);
+						}
 						var buck = newBuckets.buckets[idx].read() : unmanaged Bucket(keyType, valType)?;
 						buck.count += 1;
 						buck.keys[buck.count] = k;
@@ -452,7 +448,7 @@ class DistributedMapImpl {
 		idx = (curr._hash(defaultHash) % (curr.buckets.size):uint):int;
 		while (true) {
 			if ASSERT then assert(curr.buckets.domain.contains(idx), "Bad idx ", idx, " not in domain ", curr.buckets.domain);
-      var next = curr.buckets[idx].read();
+	  var next = curr.buckets[idx].read();
 			// if (next != nil) {
 			// 	var lock = next.lock.read();
 			// 	if (lock == E_AVAIL || lock == E_LOCK) {
@@ -469,7 +465,7 @@ class DistributedMapImpl {
 
 				// Otherwise, speculatively create a new bucket to add in.
 				var newList = new unmanaged Bucket(keyType, valType);
-                newList.parent = curr;
+				newList.parent = curr;
 				newList.lock.write(E_LOCK);
 
 				// We set our Bucket, we also own it so return it
@@ -514,8 +510,8 @@ class DistributedMapImpl {
 					for (k,v,t) in zip(bucket.keys, bucket.values, bucket.topHash) {
 						var idx = (newBuckets.hash(k) % newBuckets.buckets.size:uint):int;
 						if newBuckets.buckets[idx].read() == nil {
-                          var newBucket = new unmanaged Bucket(keyType, valType);
-                          newBucket.parent = newBuckets;
+						  var newBucket = new unmanaged Bucket(keyType, valType);
+						  newBucket.parent = newBuckets;
 							newBuckets.buckets[idx].write(newBucket);
 						}
 						var buck = newBuckets.buckets[idx].read() : unmanaged Bucket(keyType, valType)?;
@@ -548,22 +544,22 @@ class DistributedMapImpl {
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
 			// local {
 			  var done = false;
-              var elist = _this.getEList(key, true, tok);
-              for i in 1..elist.count {
-                if (elist.keys[i] == _key) {
-                  elist.lock.write(E_AVAIL);
-                  done = true;
-                  break;
-                }
-              }
-              if (!done) {
-                // count.add(1);
-                elist.count += 1;
-                elist.keys[elist.count] = _key;
-                elist.values[elist.count] = _val;
-                elist.lock.write(E_AVAIL);
-              }
-            // }
+			  var elist = _this.getEList(key, true, tok);
+			  for i in 1..elist.count {
+				if (elist.keys[i] == _key) {
+				  elist.lock.write(E_AVAIL);
+				  done = true;
+				  break;
+				}
+			  }
+			  if (!done) {
+				// count.add(1);
+				elist.count += 1;
+				elist.keys[elist.count] = _key;
+				elist.values[elist.count] = _val;
+				elist.lock.write(E_AVAIL);
+			  }
+			// }
 		}
 		tok.unpin();
 	}
@@ -583,7 +579,7 @@ class DistributedMapImpl {
 	}
 
 	proc findAsync(key : keyType, tok) {
-        const defaultHash = chpl__defaultHash(key);
+		const defaultHash = chpl__defaultHash(key);
 		const idx = (this._rootHash(defaultHash) % (this.rootBuckets.size):uint):int;
 		var future = new unmanaged MapFuture(valType);
 		assert(future.loc == future.locale);
@@ -710,23 +706,23 @@ class DistributedMapImpl {
 		if PRINT_TIME {
 			timer.start();
 		}
-		const initLoc = here.locale;
+		const _buff = buffer.getArray();
+		buffer.done();
+		// (MapAction.find?, found?, val)
+		var _findBuff : [_buff.domain] (bool, bool, valType?);
+		var _findOpExists = false;
 		on loc {
-			var buff = buffer.getArray();
-
-			buffer.done();
-			forall x in buff {
-				if (x[1] == MapAction.find) {
-					writeln(x, x[1], x[2], x[3], x[4], x[5]," ", x[6], " ", addr(x[6]));
-				}
-			}
-			/*
+			const buff = _buff;
+			var findBuff : [buff.domain] (bool, bool, valType?);
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
-			forall (action, key, val, defaultHash, idx, future) in buff with (var tok = _this.getToken()) {
-				if (action == MapAction.find) {
-					writeln(future);
-				}
+			var findOpExists = false;
+			forall  i in buff.domain with (var tok = _this.getToken(), ref findOpExists) {
 				tok.pin();
+				const action = buff[i][1];
+				const key = buff[i][2];
+				const val = buff[i][3];
+				const defaultHash = buff[i][4];
+				const idx = buff[i][5];
 				select action {
 					when MapAction.insert {
 						var timer1 = new Timer();
@@ -780,11 +776,12 @@ class DistributedMapImpl {
 					}
 
 					when MapAction.find {
+						findOpExists = true;
 						var (elist, keyIdx) = _this.getEList(key, false, defaultHash, idx, tok);
 						var success = false;
 						var retVal : _this.valType?;
 						if (elist != nil) {
-                          if ASSERT then assert(elist.count <= 8, elist);
+						  if ASSERT then assert(elist.count <= 8, elist);
 							var topHash = (defaultHash >> HASH_SHIFT):uint(8);
 							if (topHash == EMPTY) then topHash = 1;
 							for i in 1..BUCKET_NUM_ELEMS {
@@ -797,21 +794,8 @@ class DistributedMapImpl {
 								}
 							}
 							elist.lock.write(E_AVAIL);
-                            if ASSERT then assert(future != nil);
 						}
-						assert(future != nil);
-						// assert(future.locale == initLoc, "here: ", here.locale, ", initLoc: ", initLoc, ", futureLoc: ", future.locale);
-						assert(future.locale == future.loc, "future.loc: ", future.loc, ", future.locale: ", future.locale);
-						if success {
-							// future.found = true; // call this using `on`?
-							// future.val = retVal;
-							// future.complete = true;
-							// future.success(retVal);
-						}
-						else {
-							// future.complete.write(true);
-							// future.fail();
-						}
+						findBuff[i] = (true, success, retVal);
 					}
 
 					when MapAction.erase {
@@ -825,14 +809,12 @@ class DistributedMapImpl {
 							writeln(tm, " getEList");
 						}
 						if (elist != nil) {
-                          if ASSERT then assert(elist.count <= 8, elist);
+						  if ASSERT then assert(elist.count <= 8, elist);
 							var topHash = (defaultHash >> HASH_SHIFT):uint(8);
 							if (topHash == EMPTY) then topHash = 1;
 							for i in 1..BUCKET_NUM_ELEMS {
 								if (elist.topHash[i] == topHash) {
 									if (elist.keys[i] == key) {
-										// elist.keys[i] = elist.keys[elist.count];
-										// elist.values[i] = elist.values[elist.count];
 										elist.topHash[i] = EMPTY;
 										elist.count -= 1;
 										break;
@@ -849,10 +831,25 @@ class DistributedMapImpl {
 				}
 				tok.unpin();
 			}
+			if findOpExists {
+				_findOpExists = true;
+				_findBuff = findBuff;
+			}
+		}
+		if _findOpExists {
+			forall i in _findBuff.domain {
+				if (_findBuff[i][1]) {
+					if _findBuff[i][2] {
+						_buff[i][6].success(_findBuff[i][3]);
+					} else {
+						_buff[i][6].fail();
+					}
+				}
+			}
 		}
 		if PRINT_TIME {
 			timer.stop();
-			writeln(timer.elapsed(), " emptyBuffer");*/
+			writeln(timer.elapsed(), " emptyBuffer");
 		}
 	}
 
@@ -892,21 +889,21 @@ class DistributedMapImpl {
 		var _pid = pid;
 		on rootBuckets[idx].locale {
 			const _key = key;
-            var (tmpres, tmpresVal) : (bool, valType);
-            var _this = chpl_getPrivatizedCopy(this.type, _pid);
+			var (tmpres, tmpresVal) : (bool, valType);
+			var _this = chpl_getPrivatizedCopy(this.type, _pid);
 			// local {
-              var elist = _this.getEList(key, false, tok);
-              if (elist != nil) {
-                for i in 1..elist.count {
-                  if (elist.keys[i] == _key) {
-                    (tmpres, tmpresVal) = (true, elist.values[i]);
-                    break;
-                  }
-                }
-                elist.lock.write(E_AVAIL);
-              }
-            // }
-            (res, resVal) = (tmpres, tmpresVal);
+			  var elist = _this.getEList(key, false, tok);
+			  if (elist != nil) {
+				for i in 1..elist.count {
+				  if (elist.keys[i] == _key) {
+					(tmpres, tmpresVal) = (true, elist.values[i]);
+					break;
+				  }
+				}
+				elist.lock.write(E_AVAIL);
+			  }
+			// }
+			(res, resVal) = (tmpres, tmpresVal);
 		}
 		tok.unpin();
 		return (res, resVal);
@@ -921,20 +918,20 @@ class DistributedMapImpl {
 			var _this = chpl_getPrivatizedCopy(this.type, _pid);
 			// var (elist, pList, idx) = getPEList(key, false, tok);
 			// local {
-              var elist = _this.getEList(_key, false, tok);
-              if (elist != nil) {
-                for i in 1..elist.count {
-                  if (elist.keys[i] == _key) {
-                    // count.sub(1);
-                    elist.keys[i] = elist.keys[elist.count];
-                    elist.values[i] = elist.values[elist.count];
-                    elist.count -= 1;
-                    break;
-                  }
-                }
-                elist.lock.write(E_AVAIL);
-              }
-            // }
+			  var elist = _this.getEList(_key, false, tok);
+			  if (elist != nil) {
+				for i in 1..elist.count {
+				  if (elist.keys[i] == _key) {
+					// count.sub(1);
+					elist.keys[i] = elist.keys[elist.count];
+					elist.values[i] = elist.values[elist.count];
+					elist.count -= 1;
+					break;
+				  }
+				}
+				elist.lock.write(E_AVAIL);
+			  }
+			// }
 
 			// if elist.count == 0 {
 			// 	pList.buckets[idx].write(nil);
@@ -1080,13 +1077,13 @@ proc randomAsyncOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 			for i in 1..opspertask {
 			var s = rng.getNext();
 				var key = keyRng.getNext(0, maxLimit:int);
-				// if s < 0.1 {
-				// 	map.insertAsync(key,i, tok);
-				// } else if s < 0.2 {
-				// 	map.eraseAsync(key, tok);
-				// } else {
+				if s < 0.1 {
+					map.insertAsync(key,i, tok);
+				} else if s < 0.2 {
+					map.eraseAsync(key, tok);
+				} else {
 					map.findAsync(key, tok);
-				// }
+				}
 			}
 		}
 		if FLUSHLOCAL then map.flushLocalBuffers();
@@ -1113,112 +1110,112 @@ proc diagnosticstest() {
 }
 
 proc insertOpStrongBenchmark (maxLimit : uint = max(uint(16)), tasks = here.maxTaskPar) {
-    var timer = new Timer();
+	var timer = new Timer();
 	var map = new DistributedMap(int, int);
-    timer.start();
-    const opspertask = N / tasks;
-    coforall tid in 1..tasks {
-        var keyRng = new RandomStream(int);
-        var tok = map.getToken();
+	timer.start();
+	const opspertask = N / tasks;
+	coforall tid in 1..tasks {
+		var keyRng = new RandomStream(int);
+		var tok = map.getToken();
 		for i in 1..opspertask {
-            var key = keyRng.getNext(0, maxLimit:int);
-            map.insertAsync(key,i,tok);
-        }
-    }
-    timer.stop();
-    const totalOps = opspertask*tasks;
-    writeln(tasks, " tasks, ", ((10**9)*timer.elapsed())/totalOps, " ns/op");
+			var key = keyRng.getNext(0, maxLimit:int);
+			map.insertAsync(key,i,tok);
+		}
+	}
+	timer.stop();
+	const totalOps = opspertask*tasks;
+	writeln(tasks, " tasks, ", ((10**9)*timer.elapsed())/totalOps, " ns/op");
 }
 
 proc eraseOpStrongBenchmark (maxLimit : uint = max(uint(16)), tasks = here.maxTaskPar) {
-    var timer = new Timer();
+	var timer = new Timer();
 	var map = new DistributedMap(int, int);
-    var tok = map.getToken();
+	var tok = map.getToken();
 	map.insertAsync(0..65535, 0, tok);
-    timer.start();
-    const opspertask = N / tasks;
-    coforall tid in 1..tasks {
-        var keyRng = new RandomStream(int);
-        var tok = map.getToken();
+	timer.start();
+	const opspertask = N / tasks;
+	coforall tid in 1..tasks {
+		var keyRng = new RandomStream(int);
+		var tok = map.getToken();
 		for i in 1..opspertask {
-            var key = keyRng.getNext(0, maxLimit:int);
-            map.eraseAsync(key,tok);
-        }
-    }
-    timer.stop();
-    const totalOps = opspertask*tasks;
-    writeln(tasks, " tasks, ", ((10**9)*timer.elapsed())/totalOps, " ns/op");
+			var key = keyRng.getNext(0, maxLimit:int);
+			map.eraseAsync(key,tok);
+		}
+	}
+	timer.stop();
+	const totalOps = opspertask*tasks;
+	writeln(tasks, " tasks, ", ((10**9)*timer.elapsed())/totalOps, " ns/op");
 }
 
 proc findOpStrongBenchmark (maxLimit : uint = max(uint(16)), tasks = here.maxTaskPar) {
-    var timer = new Timer();
+	var timer = new Timer();
 	var map = new DistributedMap(int, int);
-    var tok = map.getToken();
+	var tok = map.getToken();
 map.insertAsync(0..65535, 0, tok);
-    timer.start();
-    const opspertask = N / tasks;
-    coforall tid in 1..tasks {
-        var keyRng = new RandomStream(int);
-        var tok = map.getToken();
+	timer.start();
+	const opspertask = N / tasks;
+	coforall tid in 1..tasks {
+		var keyRng = new RandomStream(int);
+		var tok = map.getToken();
 		for i in 1..opspertask {
-            var key = keyRng.getNext(0, maxLimit:int);
-            map.findAsync(key,tok);
-        }
-    }
-    timer.stop();
-    const totalOps = opspertask*tasks;
-    writeln(tasks, " tasks, ", ((10**9)*timer.elapsed())/totalOps, " ns/op");
+			var key = keyRng.getNext(0, maxLimit:int);
+			map.findAsync(key,tok);
+		}
+	}
+	timer.stop();
+	const totalOps = opspertask*tasks;
+	writeln(tasks, " tasks, ", ((10**9)*timer.elapsed())/totalOps, " ns/op");
 }
 
 proc intSetStrongBenchmark (maxLimit : uint = max(uint(16)), tasks = here.maxTaskPar) {
-    var timer = new Timer();
+	var timer = new Timer();
 	var map = new DistributedMap(int, int);
-    var tok = map.getToken();
+	var tok = map.getToken();
 	map.insertAsync(0..65535, 0, tok);
-    timer.start();
-    const opspertask = N / tasks;
-    coforall tid in 1..tasks {
-        var rng = new RandomStream(real);
-        var keyRng = new RandomStream(int);
+	timer.start();
+	const opspertask = N / tasks;
+	coforall tid in 1..tasks {
+		var rng = new RandomStream(real);
+		var keyRng = new RandomStream(int);
 		var tok = map.getToken();
-        for i in 1..opspertask {
-            var s = rng.getNext();
-            var key = keyRng.getNext(0, maxLimit:int);
-            if s < 0.8 {
-                map.findAsync(key, tok);
-            } else if s < 0.9 {
-                map.insertAsync(key, i, tok);
-            } else {
-                map.eraseAsync(key, tok);
-            }
-        }
-    }
-    timer.stop();
-    const totalOps = opspertask*tasks;
-    writeln(tasks, " tasks, ", ((10**9)*timer.elapsed())/totalOps, " ns/op");
+		for i in 1..opspertask {
+			var s = rng.getNext();
+			var key = keyRng.getNext(0, maxLimit:int);
+			if s < 0.8 {
+				map.findAsync(key, tok);
+			} else if s < 0.9 {
+				map.insertAsync(key, i, tok);
+			} else {
+				map.eraseAsync(key, tok);
+			}
+		}
+	}
+	timer.stop();
+	const totalOps = opspertask*tasks;
+	writeln(tasks, " tasks, ", ((10**9)*timer.elapsed())/totalOps, " ns/op");
 }
 
 proc main() {
 	// var tasksArray = [1,2,4,8,16,32,44];
-    // writeln("Insert Benchmark:");
-    // for tasks in tasksArray {
-    //     insertOpStrongBenchmark(max(uint(16)), tasks);
-    // }
-    // writeln();
-    // writeln("Erase Benchmark:");
-    // for tasks in tasksArray {
-    //     eraseOpStrongBenchmark(max(uint(16)), tasks);
-    // }
-    // writeln();
-    // writeln("Find Benchmark:");
-    // for tasks in tasksArray {
-    //     findOpStrongBenchmark(max(uint(16)), tasks);
-    // }
-    // writeln();
-    // writeln("Intset Benchmark:");
-    // for tasks in tasksArray {
-    //     intSetStrongBenchmark(max(uint(16)), tasks);
-    // }
+	// writeln("Insert Benchmark:");
+	// for tasks in tasksArray {
+	//     insertOpStrongBenchmark(max(uint(16)), tasks);
+	// }
+	// writeln();
+	// writeln("Erase Benchmark:");
+	// for tasks in tasksArray {
+	//     eraseOpStrongBenchmark(max(uint(16)), tasks);
+	// }
+	// writeln();
+	// writeln("Find Benchmark:");
+	// for tasks in tasksArray {
+	//     findOpStrongBenchmark(max(uint(16)), tasks);
+	// }
+	// writeln();
+	// writeln("Intset Benchmark:");
+	// for tasks in tasksArray {
+	//     intSetStrongBenchmark(max(uint(16)), tasks);
+	// }
 	if (VERBOSE) then startVerboseComm();
 	randomAsyncOpsStrongBenchmark(max(uint(16)));
 	if (VERBOSE) then stopVerboseComm();
