@@ -310,6 +310,7 @@ class DistributedMapImpl {
 	var aggregator = UninitializedAggregator(msgType);
 	var manager : EpochManager;
 	var seedRNG = new owned RandomStream(uint(64), parSafe=true);
+	var iterRNG = new owned RandomStream(uint(64), parSafe=true);
 	const rootSeed : uint(64); // Same across all nodes...
 
 	proc init(type keyType, type valType) {
@@ -999,6 +1000,95 @@ class DistributedMapImpl {
 			return res + 1;
 		}
 	}
+
+	iter these() : (keyType, valType) {
+		var tok = this.getToken();
+		tok.pin();
+		const localeId = here.locale.id;
+		var _pid = pid;
+		var startLocaleId = ((iterRNG.getNext())%(numLocales):uint):int;
+		for _lid in 0..#numLocales {
+			var lid = (startLocaleId + _lid) % numLocales;
+			on Locales[lid] {
+				var _this = chpl_getPrivatizedCopy(this.type, _pid);
+				const startRootIdx = ((_this.iterRNG.getNext())%(_this.rootBuckets.size):uint):int;
+				const sz = _this.rootBuckets.size;
+				var workList = new LockFreeQueue(unmanaged Buckets(_this.keyType, _this.valType));
+				var deferredList = new LockFreeQueue((unmanaged Buckets(_this.keyType, _this.valType)?, int));
+				var workListTok : owned TokenWrapper = workList.getToken();
+				var deferredListTok : owned TokenWrapper = deferredList.getToken();
+				for i in 0..#sz {
+					var rootIdx = (startRootIdx + i) % sz;
+					if _this.rootBuckets[rootIdx].locale == here {
+						var bucketBase = _this.rootBuckets[rootIdx].read();
+						if (bucketBase != nil) {
+							if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+								var bucket = bucketBase : unmanaged Bucket(_this.keyType, _this.valType)?;
+								for j in 1..BUCKET_NUM_ELEMS {
+									if bucket.topHash[j] != EMPTY then
+										yield (bucket.keys[j], bucket.values[j]);
+								}
+								bucket.lock.write(E_AVAIL);
+							} else if (bucketBase.lock.read() == P_INNER) {
+								var buckets = bucketBase : unmanaged Buckets(_this.keyType, _this.valType)?;
+								workList.enqueue(buckets, workListTok);
+							} else {
+								const nilElem : unmanaged Buckets(_this.keyType, _this.valType)?;
+								var deferredElem = (nilElem, rootIdx);
+								deferredList.enqueue(deferredElem, deferredListTok);
+							}
+						}
+					}
+				}
+
+				while (true) {
+					var (hasNode, _node) = workList.dequeue(workListTok);
+					if (!hasNode) {
+						var (hasDeferredNode, deferredNode) = deferredList.dequeue(deferredListTok);
+						if (!hasDeferredNode) {
+							break;
+						}
+						var pList = deferredNode[1];
+						var idx = deferredNode[2];
+						var bucketBase = pList.buckets[idx].read();
+						if (bucketBase != nil) {
+							if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+								var bucket = bucketBase : unmanaged Bucket(keyType, valType)?;
+								for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
+								bucket.lock.write(E_AVAIL);
+								continue;
+							} else if (bucketBase.lock.read() == P_INNER) {
+								_node = bucketBase : unmanaged Buckets(keyType, valType)?;
+							} else {
+								deferredList.enqueue(deferredNode, deferredListTok);
+								continue;
+							}
+						}
+					}
+
+					var startIdx = ((_this.iterRNG.getNext())%(_node.buckets.size):uint):int;
+					for i in 0..(_node.buckets.size-1) {
+						var idx = (startIdx + i)%_node.buckets.size;
+						var bucketBase = _node.buckets[idx].read();
+						if (bucketBase != nil) {
+							if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+								var bucket = bucketBase : unmanaged Bucket(keyType, valType)?;
+								for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
+								bucket.lock.write(E_AVAIL);
+							} else if (bucketBase.lock.read() == P_INNER) {
+								var bucket = bucketBase : unmanaged Buckets(keyType, valType)?;
+								workList.enqueue(bucket, workListTok);
+							} else {
+								var deferredElem = (_node, idx);
+								deferredList.enqueue(deferredElem, deferredListTok);
+							}
+						}
+					}
+				}
+			}
+		}
+		tok.unpin();
+	}
 }
 
 config const N = 1024 * 1024;
@@ -1071,6 +1161,7 @@ proc randomOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 	writeln("Time taken: ", timer.elapsed());
 	var opspersec = N/timer.elapsed();
 	writeln("Completed ", N, " operations in ", timer.elapsed(), "s with ", opspersec, " operations/sec");
+	writeln(10**9/opspersec, "ns/op");
 }
 
 proc randomAsyncOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
@@ -1109,6 +1200,7 @@ proc randomAsyncOpsStrongBenchmark (maxLimit : uint = max(uint(16))) {
 	writeln("Time taken : ", timer.elapsed());
 	var opspersec = N/timer.elapsed();
 	writeln("Completed ", N, " operations in ", timer.elapsed(), "s with ", opspersec, " operations/sec");
+	writeln(10**9/opspersec, "ns/op");
 	if DFS then map.dfs();
 }
 
@@ -1210,6 +1302,20 @@ proc intSetStrongBenchmark (maxLimit : uint = max(uint(16)), tasks = here.maxTas
 	writeln(tasks, " tasks, ", ((10**9)*timer.elapsed())/totalOps, " ns/op");
 }
 
+proc iterTest() {
+	var map = new DistributedMap(int, int);
+	map.insert(1..1024, 0);
+	var count = 0;
+	map.insert(1025..65536, 0);
+	count = 0;
+	if VDEBUG then startVdebug("DIHT");
+	for x in map {
+
+	}
+
+	if VDEBUG then stopVdebug();
+}
+
 proc main() {
 	// var tasksArray = [1,2,4,8,16,32,44];
 	// writeln("Insert Benchmark:");
@@ -1231,9 +1337,10 @@ proc main() {
 	// for tasks in tasksArray {
 	//     intSetStrongBenchmark(max(uint(16)), tasks);
 	// }
-	if (VERBOSE) then startVerboseComm();
-	randomAsyncOpsStrongBenchmark(max(uint(16)));
-	if (VERBOSE) then stopVerboseComm();
+	// if (VERBOSE) then startVerboseComm();
+	// randomOpsStrongBenchmark(max(uint(16)));
+	// if (VERBOSE) then stopVerboseComm();
+	iterTest();
 	// var map = new DistributedMap(int, int);
 	// var a : [0..#ROOT_BUCKETS_SIZE] int;
 	// var b : [0..#ROOT_BUCKETS_SIZE] int;
