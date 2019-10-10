@@ -1089,6 +1089,101 @@ class DistributedMapImpl {
 		}
 		tok.unpin();
 	}
+
+	iter these(param tag:iterKind) where tag == iterKind.standalone {
+		var tok = this.getToken();
+		tok.pin();
+		const localeId = here.locale.id;
+		var _pid = pid;
+		var startLocaleId = ((iterRNG.getNext())%(numLocales):uint):int;
+		coforall loc in Locales do on loc {
+			var _this = chpl_getPrivatizedCopy(this.type, _pid);
+			var started : atomic int;
+			var finished : atomic int;
+			const startRootIdx = ((_this.iterRNG.getNext())%(_this.rootBuckets.size):uint):int;
+			const sz = _this.rootBuckets.size;
+			var workList = new LockFreeQueue(unmanaged Buckets(_this.keyType, _this.valType));
+			var deferredList = new LockFreeQueue((unmanaged Buckets(_this.keyType, _this.valType)?, int));
+			var _workListTok : owned TokenWrapper = workList.getToken();
+			var _deferredListTok : owned TokenWrapper = deferredList.getToken();
+			for i in 0..#sz {
+				var rootIdx = (startRootIdx + i) % sz;
+				if _this.rootBuckets[rootIdx].locale == here {
+					var bucketBase = _this.rootBuckets[rootIdx].read();
+					if (bucketBase != nil) {
+						if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+							var bucket = bucketBase : unmanaged Bucket(_this.keyType, _this.valType)?;
+							for j in 1..BUCKET_NUM_ELEMS {
+								if bucket.topHash[j] != EMPTY then
+									yield (bucket.keys[j], bucket.values[j]);
+							}
+							bucket.lock.write(E_AVAIL);
+						} else if (bucketBase.lock.read() == P_INNER) {
+							var buckets = bucketBase : unmanaged Buckets(_this.keyType, _this.valType)?;
+							started.add(1);
+							workList.enqueue(buckets, _workListTok);
+						} else {
+							const nilElem : unmanaged Buckets(_this.keyType, _this.valType)?;
+							var deferredElem = (nilElem, rootIdx);
+							deferredList.enqueue(deferredElem, _deferredListTok);
+						}
+					}
+				}
+			}
+
+			coforall tid in 1..here.maxTaskPar {
+				var workListTok : owned TokenWrapper = workList.getToken();
+				var deferredListTok : owned TokenWrapper = deferredList.getToken();
+				while (true) {
+					var (hasNode, _node) = workList.dequeue(workListTok);
+					if (!hasNode) {
+						var (hasDeferredNode, deferredNode) = deferredList.dequeue(deferredListTok);
+						if (!hasDeferredNode) {
+							if (started.read() == finished.read()) then break;
+							else continue;
+						}
+						var pList = deferredNode[1];
+						var idx = deferredNode[2];
+						var bucketBase = pList.buckets[idx].read();
+						if (bucketBase != nil) {
+							if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+								var bucket = bucketBase : unmanaged Bucket(keyType, valType)?;
+								for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
+								bucket.lock.write(E_AVAIL);
+								continue;
+							} else if (bucketBase.lock.read() == P_INNER) {
+								_node = bucketBase : unmanaged Buckets(keyType, valType)?;
+							} else {
+								deferredList.enqueue(deferredNode, deferredListTok);
+								continue;
+							}
+						}
+					} else finished.add(1);
+
+					var startIdx = ((_this.iterRNG.getNext())%(_node.buckets.size):uint):int;
+					for i in 0..(_node.buckets.size-1) {
+						var idx = (startIdx + i)%_node.buckets.size;
+						var bucketBase = _node.buckets[idx].read();
+						if (bucketBase != nil) {
+							if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
+								var bucket = bucketBase : unmanaged Bucket(keyType, valType)?;
+								for j in 1..bucket.count do yield (bucket.keys[j], bucket.values[j]);
+								bucket.lock.write(E_AVAIL);
+							} else if (bucketBase.lock.read() == P_INNER) {
+								var bucket = bucketBase : unmanaged Buckets(keyType, valType)?;
+								started.add(1);
+								workList.enqueue(bucket, workListTok);
+							} else {
+								var deferredElem = (_node, idx);
+								deferredList.enqueue(deferredElem, deferredListTok);
+							}
+						}
+					}
+				}
+			}
+		}
+		tok.unpin();
+	}
 }
 
 config const N = 1024 * 1024;
@@ -1304,15 +1399,13 @@ proc intSetStrongBenchmark (maxLimit : uint = max(uint(16)), tasks = here.maxTas
 
 proc iterTest() {
 	var map = new DistributedMap(int, int);
-	map.insert(1..1024, 0);
-	var count = 0;
-	map.insert(1025..65536, 0);
-	count = 0;
+	var count : atomic int;
+	forall i in 1..65536 with (var tok = map.getToken()) do  map.insert(i, 0, tok);
 	if VDEBUG then startVdebug("DIHT");
-	for x in map {
-
+	forall x in map {
+		count.add(1);
 	}
-
+	writeln(count.read());
 	if VDEBUG then stopVdebug();
 }
 
