@@ -1397,19 +1397,35 @@ proc intSetStrongBenchmark (maxLimit : uint = max(uint(16)), tasks = here.maxTas
 	writeln(tasks, " tasks, ", ((10**9)*timer.elapsed())/totalOps, " ns/op");
 }
 
-proc iterTest() {
+proc iterationBenchmark() {
+	writeln("Iteration Test: ");
 	var map = new DistributedMap(int, int);
-	var count : atomic int;
-	forall i in 1..65536 with (var tok = map.getToken()) do  map.insert(i, 0, tok);
-	if VDEBUG then startVdebug("DIHT");
-	forall x in map {
-		count.add(1);
+	forall i in 1..65536 with (var tok = map.getToken()) {
+		map.insert(i, 0, tok);
 	}
-	writeln(count.read());
-	if VDEBUG then stopVdebug();
+	var timer = new Timer();
+	timer.start();
+	forall i in map {
+		sleep(10, TimeUnits.microseconds);
+	}
+	timer.stop();
+	writeln("Concurrent iteration: " + timer.elapsed():string);
+	timer.clear();
+
+	timer.start();
+	for i in map {
+		sleep(10, TimeUnits.microseconds);
+	}
+	timer.stop();
+	writeln("Serial iteration: " + timer.elapsed():string);
+	timer.clear();
+	writeln();
 }
 
 proc main() {
+	iterationBenchmark();
+
+
 	// var tasksArray = [1,2,4,8,16,32,44];
 	// writeln("Insert Benchmark:");
 	// for tasks in tasksArray {
@@ -1433,7 +1449,6 @@ proc main() {
 	// if (VERBOSE) then startVerboseComm();
 	// randomOpsStrongBenchmark(max(uint(16)));
 	// if (VERBOSE) then stopVerboseComm();
-	iterTest();
 	// var map = new DistributedMap(int, int);
 	// var a : [0..#ROOT_BUCKETS_SIZE] int;
 	// var b : [0..#ROOT_BUCKETS_SIZE] int;
