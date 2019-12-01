@@ -81,10 +81,10 @@ class DeferredNode {
 	}
 }
 
-class StackNode {
+class QueueNode {
 	type eltType;
 	var val : eltType?;
-	var next : unmanaged StackNode(eltType?)?;
+	var next : unmanaged QueueNode(eltType?)?;
 
 	proc init(type eltType) {
 		this.eltType = eltType;
@@ -96,33 +96,40 @@ class StackNode {
 	}
 }
 
-class Stack {
+class Queue {
 	type eltType;
-	var top : unmanaged StackNode(eltType?)?;
+	var head : unmanaged QueueNode(eltType?)?;
+	var tail : unmanaged QueueNode(eltType?)?;
 	var count : int;
 
 	proc init(type eltType) {
 		this.eltType = eltType;
 	}
 
-	proc push(val : eltType?) {
-		var node = new unmanaged StackNode(val);
-		node.next = top;
-		top = node;
+	proc enqueue(val : eltType?) {
+		var node = new unmanaged QueueNode(val);
+		if count == 0 {
+			tail = node;
+			head = tail;
+		} else {
+			tail.next = node;
+			tail = node;
+		}
 		count += 1;
 	}
 
-	proc pop() : eltType? {
+	proc dequeue() : (bool, eltType?) {
 		if (count > 0) {
-			var ret = top.val;
-			var next = top.next;
-			delete top;
-			top = next;
+			var ret = head.val;
+			var next = head.next;
+			delete head;
+			head = next;
 			count -= 1;
-			return ret;
+			if count == 0 then tail = nil;
+			return (true, ret);
 		} else {
 			var temp : eltType?;
-			return temp;
+			return (false, temp);
 		}
 	}
 
@@ -293,7 +300,7 @@ record DistributedMap {
 
 	proc destroy() {
 		coforall loc in Locales do on loc {
-			delete chpl_getPrivatizedCopy(unmanaged DistributedMapImpl, _pid);
+			delete chpl_getPrivatizedCopy(unmanaged DistributedMapImpl(keyType, valType), _pid);
 		}
 	}
 
@@ -1013,10 +1020,10 @@ class DistributedMapImpl {
 				var _this = chpl_getPrivatizedCopy(this.type, _pid);
 				const startRootIdx = ((_this.iterRNG.getNext())%(_this.rootBuckets.size):uint):int;
 				const sz = _this.rootBuckets.size;
-				var workList = new LockFreeQueue(unmanaged Buckets(_this.keyType, _this.valType));
-				var deferredList = new LockFreeQueue((unmanaged Buckets(_this.keyType, _this.valType)?, int));
-				var workListTok : owned TokenWrapper = workList.getToken();
-				var deferredListTok : owned TokenWrapper = deferredList.getToken();
+				var workList = new unmanaged Queue(unmanaged Buckets(_this.keyType, _this.valType));
+				var deferredList = new unmanaged Queue((unmanaged Buckets(_this.keyType, _this.valType)?, int));
+				// var workListTok : owned TokenWrapper = workList.getToken();
+				// var deferredListTok : owned TokenWrapper = deferredList.getToken();
 				for i in 0..#sz {
 					var rootIdx = (startRootIdx + i) % sz;
 					if _this.rootBuckets[rootIdx].locale == here {
@@ -1031,26 +1038,32 @@ class DistributedMapImpl {
 								bucket.lock.write(E_AVAIL);
 							} else if (bucketBase.lock.read() == P_INNER) {
 								var buckets = bucketBase : unmanaged Buckets(_this.keyType, _this.valType)?;
-								workList.enqueue(buckets, workListTok);
+								workList.enqueue(buckets);
 							} else {
 								const nilElem : unmanaged Buckets(_this.keyType, _this.valType)?;
 								var deferredElem = (nilElem, rootIdx);
-								deferredList.enqueue(deferredElem, deferredListTok);
+								deferredList.enqueue(deferredElem);
 							}
 						}
 					}
 				}
+				// writeln("here");
 
 				while (true) {
-					var (hasNode, _node) = workList.dequeue(workListTok);
+					var (hasNode, _node) = workList.dequeue();
 					if (!hasNode) {
-						var (hasDeferredNode, deferredNode) = deferredList.dequeue(deferredListTok);
+						var (hasDeferredNode, deferredNode) = deferredList.dequeue();
 						if (!hasDeferredNode) {
 							break;
 						}
 						var pList = deferredNode[1];
 						var idx = deferredNode[2];
-						var bucketBase = pList.buckets[idx].read();
+						var bucketBase : unmanaged Base(_this.keyType, _this.valType)?;
+						if (pList != nil) {
+							bucketBase = pList.buckets[idx].read();
+						} else {
+							bucketBase = rootBuckets[idx].read();
+						}
 						if (bucketBase != nil) {
 							if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
 								var bucket = bucketBase : unmanaged Bucket(keyType, valType)?;
@@ -1058,9 +1071,11 @@ class DistributedMapImpl {
 								bucket.lock.write(E_AVAIL);
 								continue;
 							} else if (bucketBase.lock.read() == P_INNER) {
-								_node = bucketBase : unmanaged Buckets(keyType, valType)?;
+								_node = bucketBase : unmanaged Buckets(_this.keyType, _this.valType)?;
 							} else {
-								deferredList.enqueue(deferredNode, deferredListTok);
+								// writeln(bucketBase.lock.read());
+								deferredList.enqueue(deferredNode);
+								chpl_task_yield();
 								continue;
 							}
 						}
@@ -1077,10 +1092,12 @@ class DistributedMapImpl {
 								bucket.lock.write(E_AVAIL);
 							} else if (bucketBase.lock.read() == P_INNER) {
 								var bucket = bucketBase : unmanaged Buckets(keyType, valType)?;
-								workList.enqueue(bucket, workListTok);
+								workList.enqueue(bucket);
 							} else {
+								// writeln(bucketBase.lock.read());
 								var deferredElem = (_node, idx);
-								deferredList.enqueue(deferredElem, deferredListTok);
+								deferredList.enqueue(deferredElem);
+								chpl_task_yield();
 							}
 						}
 					}
@@ -1120,7 +1137,7 @@ class DistributedMapImpl {
 							bucket.lock.write(E_AVAIL);
 						} else if (bucketBase.lock.read() == P_INNER) {
 							var buckets = bucketBase : unmanaged Buckets(_this.keyType, _this.valType)?;
-							started.add(1);
+							// started.add(1);
 							workList.enqueue(buckets, _workListTok);
 						} else {
 							const nilElem : unmanaged Buckets(_this.keyType, _this.valType)?;
@@ -1139,12 +1156,18 @@ class DistributedMapImpl {
 					if (!hasNode) {
 						var (hasDeferredNode, deferredNode) = deferredList.dequeue(deferredListTok);
 						if (!hasDeferredNode) {
-							if (started.read() == finished.read()) then break;
-							else continue;
+							// if (started.read() == finished.read()) then break;
+							// else continue;
+							break;
 						}
 						var pList = deferredNode[1];
 						var idx = deferredNode[2];
-						var bucketBase = pList.buckets[idx].read();
+						var bucketBase : unmanaged Base(_this.keyType, _this.valType)?;
+						if (pList != nil) {
+							bucketBase = pList.buckets[idx].read();
+						} else {
+							bucketBase = rootBuckets[idx].read();
+						}
 						if (bucketBase != nil) {
 							if (bucketBase.lock.read() == E_AVAIL && bucketBase.lock.compareAndSwap(E_AVAIL, E_LOCK)) {
 								var bucket = bucketBase : unmanaged Bucket(keyType, valType)?;
@@ -1155,10 +1178,11 @@ class DistributedMapImpl {
 								_node = bucketBase : unmanaged Buckets(keyType, valType)?;
 							} else {
 								deferredList.enqueue(deferredNode, deferredListTok);
+								chpl_task_yield();
 								continue;
 							}
 						}
-					} else finished.add(1);
+					} // else finished.add(1);
 
 					var startIdx = ((_this.iterRNG.getNext())%(_node.buckets.size):uint):int;
 					for i in 0..(_node.buckets.size-1) {
@@ -1171,11 +1195,12 @@ class DistributedMapImpl {
 								bucket.lock.write(E_AVAIL);
 							} else if (bucketBase.lock.read() == P_INNER) {
 								var bucket = bucketBase : unmanaged Buckets(keyType, valType)?;
-								started.add(1);
+								// started.add(1);
 								workList.enqueue(bucket, workListTok);
 							} else {
 								var deferredElem = (_node, idx);
 								deferredList.enqueue(deferredElem, deferredListTok);
+								chpl_task_yield();
 							}
 						}
 					}
@@ -1184,9 +1209,14 @@ class DistributedMapImpl {
 		}
 		tok.unpin();
 	}
+
+	proc tryReclaim() {
+		manager.tryReclaim();
+	}
 }
 
-config const N = 1024 * 1024;
+config const keyRange = 2 ** 30;
+config const N = 1024 * 8;
 
 proc randomOpsBenchmark (maxLimit : uint = max(uint(16))) {
 	var timer = new Timer();
@@ -1398,32 +1428,114 @@ proc intSetStrongBenchmark (maxLimit : uint = max(uint(16)), tasks = here.maxTas
 }
 
 proc iterationBenchmark() {
-	writeln("Iteration Test: ");
+	writeln("Iteration Benchmark: ");
 	var map = new DistributedMap(int, int);
-	forall i in 1..65536 with (var tok = map.getToken()) {
-		map.insert(i, 0, tok);
+	forall i in (-keyRange/2)..(keyRange/2 - 1) with (var tok = map.getToken()) {
+		map.insertAsync(i, 0, tok);
 	}
+	map.flushLocalBuffers();
 	var timer = new Timer();
 	timer.start();
-	forall i in map {
-		sleep(10, TimeUnits.microseconds);
+	forall i in map with (var yieldRng = new RandomStream(int)) {
+		const yieldTimes = yieldRng.getNext(0, 10);
+		for i in 1..yieldTimes do chpl_task_yield();
 	}
 	timer.stop();
 	writeln("Concurrent iteration: " + timer.elapsed():string);
+	writeln("Concurrent iteration: ", ((10**9)*timer.elapsed())/keyRange, "ns/op.");
 	timer.clear();
 
 	timer.start();
 	for i in map {
-		sleep(10, TimeUnits.microseconds);
+		// sleep(1, TimeUnits.microseconds);
+		chpl_task_yield();
 	}
 	timer.stop();
 	writeln("Serial iteration: " + timer.elapsed():string);
+	writeln("Serial iteration: ", ((10**9)*timer.elapsed())/keyRange, "ns/op.");
 	timer.clear();
 	writeln();
 }
 
+config const CONCURRENT = false;
+config const SERIAL = false;
+
+proc concurrentIterationBenchmark() {
+	// writeln("Concurrent Benchmark: ");
+	var map = new DistributedMap(int, int);
+
+	forall i in (-keyRange/2)..(keyRange/2 - 1) with (var tok = map.getToken()) {
+		map.insertAsync(i, 0, tok);
+	}
+	map.flushLocalBuffers();
+	writeln(numLocales, " LOCALES:");
+	if VDEBUG then startVdebug("DIHT");
+	// map.tryReclaim();map.tryReclaim();map.tryReclaim();
+	var timer = new Timer();
+	if CONCURRENT {
+		timer.start();
+		for i in 1..N {
+			forall i in map {
+				sleep(0.005, TimeUnits.microseconds);
+			}
+		}
+		timer.stop();
+		writeln("Concurrent iteration: " + timer.elapsed():string);
+		writeln("Concurrent iteration: ", ((10**9)*timer.elapsed())/(N*keyRange), "ns/op.");
+	}
+	timer.clear();
+	if SERIAL {
+		timer.start();
+		coforall loc in Locales do on loc {
+			const NPerLoc = N / numLocales;
+			coforall tid in 1..here.maxTaskPar {
+				const NPerTask = NPerLoc / here.maxTaskPar;
+				for j in 1..NPerTask {
+					for i in map {
+						sleep(0.005, TimeUnits.microseconds);
+					}
+				}
+			}
+		}
+		timer.stop();
+		if VDEBUG then stopVdebug();
+		writeln("Serial iteration: " + timer.elapsed():string);
+		writeln("Serial iteration: ", ((10**9)*timer.elapsed())/(N*keyRange), "ns/op.");
+	}
+}
+
+proc serialIterationBenchmark() {
+	writeln("Serial Benchmark: ");
+	var map = new DistributedMap(int, int);
+
+	forall i in (-keyRange/2)..(keyRange/2 - 1) with (var tok = map.getToken()) {
+		map.insertAsync(i, 0, tok);
+	}
+	map.flushLocalBuffers();
+	var timer = new Timer();
+	timer.start();
+	coforall loc in Locales do on loc {
+		const NPerLoc = N / numLocales;
+		coforall tid in 1..here.maxTaskPar {
+			const NPerTask = NPerLoc / here.maxTaskPar;
+			for i in map {
+				for j in 1..NPerTask {
+					sleep(0.005, TimeUnits.microseconds);
+				}
+			}
+		}
+	}
+	timer.stop();
+	map.manager.clear();
+	map.destroy();
+	writeln("Serial iteration: " + timer.elapsed():string);
+	writeln("Serial iteration: ", ((10**9)*timer.elapsed())/(N*keyRange), "ns/op.");
+}
+
 proc main() {
-	iterationBenchmark();
+	concurrentIterationBenchmark();
+	// serialIterationBenchmark();
+	// writeln(max(uint(16)))
 
 
 	// var tasksArray = [1,2,4,8,16,32,44];
